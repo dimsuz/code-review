@@ -1,36 +1,50 @@
 package main
 
-import "vendor:sdl2"
+import SDL "vendor:sdl2"
 import "core:fmt"
 import "core:os"
+import "imgui"
 
-foreign import imgui "cimgui/cimgui.so"
+// currently taken from sdl2_opengl.odin
+// GL_VERSION_MAJOR :: 3
+// GL_VERSION_MINOR :: 3
 
-@(default_calling_convention="c")
-foreign imgui {
-  igAlignTextToFramePadding          :: proc() ---;
-}
-
-main :: proc() {
-  if (sdl2.Init({.VIDEO}) < 0) {
+main_code_review :: proc() {
+  if (SDL.Init({.VIDEO, .TIMER}) < 0) {
     fmt.println("SDL Init failed")
     os.exit(1)
   }
-  defer sdl2.Quit()
+  defer SDL.Quit()
 
-  window := sdl2.CreateWindow("Hello", sdl2.WINDOWPOS_UNDEFINED, sdl2.WINDOWPOS_UNDEFINED, 800, 800, {})
+
+  SDL.GL_SetAttribute(.CONTEXT_FLAGS,  0)
+  SDL.GL_SetAttribute(.CONTEXT_PROFILE_MASK,  i32(SDL.GLprofile.CORE))
+  SDL.GL_SetAttribute(.CONTEXT_MAJOR_VERSION, GL_VERSION_MAJOR)
+  SDL.GL_SetAttribute(.CONTEXT_MINOR_VERSION, GL_VERSION_MINOR)
+  SDL.GL_SetAttribute(.DOUBLEBUFFER, 1)
+  SDL.GL_SetAttribute(.DEPTH_SIZE, 24)
+  SDL.GL_SetAttribute(.STENCIL_SIZE, 8)
+
+  windowFlags := SDL.WINDOW_OPENGL | SDL.WINDOW_RESIZABLE | SDL.WINDOW_ALLOW_HIGHDPI
+  window := SDL.CreateWindow("Hello", SDL.WINDOWPOS_CENTERED, SDL.WINDOWPOS_CENTERED, 1280, 720, windowFlags)
   defer if (window != nil) {
-    sdl2.DestroyWindow(window)
+    SDL.DestroyWindow(window)
   }
-
   if (window == nil) {
     fmt.println("Failed to create window")
     os.exit(1)
   }
 
-  renderer := sdl2.CreateRenderer(window, -1, {})
+  gl_context := SDL.GL_CreateContext(window)
+  SDL.GL_MakeCurrent(window, gl_context)
+  SDL.GL_SetSwapInterval(1) // Enable vsync
+  defer SDL.GL_DeleteContext(gl_context)
+
+  imgui.create_context(nil)
+
+  renderer := SDL.CreateRenderer(window, -1, {})
   defer if (renderer != nil) {
-    sdl2.DestroyRenderer(renderer)
+    SDL.DestroyRenderer(renderer)
   }
   if (renderer == nil) {
     fmt.println("Failed to create renderer")
@@ -38,10 +52,10 @@ main :: proc() {
   }
 
   loop: for {
-    sdl2.SetRenderDrawColor(renderer, 96, 128, 255, 255)
-    sdl2.RenderClear(renderer)
-    event: sdl2.Event
-    for sdl2.PollEvent(&event) {
+    SDL.SetRenderDrawColor(renderer, 96, 128, 255, 255)
+    SDL.RenderClear(renderer)
+    event: SDL.Event
+    for SDL.PollEvent(&event) {
       #partial switch event.type {
         case .KEYDOWN:
           #partial switch event.key.keysym.sym {
@@ -52,7 +66,11 @@ main :: proc() {
           break loop
       }
     }
-    sdl2.RenderPresent(renderer)
-    sdl2.Delay(16)
+    SDL.RenderPresent(renderer)
+    SDL.Delay(16)
   }
+}
+
+main :: proc() {
+  main_microui()
 }
