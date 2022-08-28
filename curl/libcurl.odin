@@ -8,7 +8,9 @@ Code :: enum c.int {
 }
 
 Option :: enum c.int {
-  URL = 10000 /* STRINGPOINT */ + 2
+  URL = 10000 /* STRINGPOINT */ + 2,
+  WRITEDATA = 10000 /* CBPOINT */ + 1,
+  WRITEFUNCTION = 20000 /* FUNCPOINT */ +  11
 }
 
 @(default_calling_convention="c", link_prefix="curl_")

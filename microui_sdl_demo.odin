@@ -1,7 +1,10 @@
 package main
 
 import "core:fmt"
-import "core:c/libc"
+import "core:c"
+import "core:runtime"
+import "core:strings"
+import "core:encoding/json"
 import SDL "vendor:sdl2"
 import mu "vendor:microui"
 import "curl"
@@ -18,12 +21,65 @@ state := struct {
   bg = {90, 95, 100, 255},
 }
 
+build_response :: proc "cdecl" (data: [^]byte, size: c.size_t, nmemb: c.size_t, userdata: rawptr) -> c.size_t {
+  context = runtime.default_context()
+  strings.write_bytes((^strings.Builder)(userdata), data[:size * nmemb])
+  return size * nmemb
+}
+
+User :: struct {
+  id: int,
+  username: string,
+  name: string,
+  avatar_url: string
+}
+
+MergeRequest :: struct {
+  title: string,
+  description: string,
+  id: int,
+  iid: int,
+  project_id: int,
+  author: User
+}
+
+parse_merge_requests :: proc(response: []u8) {
+  json_data, err := json.parse(response)
+  if err != .None {
+    fmt.eprintln("Failed to parse json")
+    fmt.eprintln("Error:", err)
+    return
+  }
+  defer json.destroy_value(json_data)
+  fmt.println("Parse OK")
+  mr_list, ok := json_data.(json.Array)
+  if !ok {
+    fmt.eprintln("Expected an Array")
+    return
+  }
+  for mr_data in mr_list {
+    mr, ok := mr_data.(json.Object)
+    if !ok {
+      fmt.eprintln("Expected an Object")
+      return
+    }
+    fmt.println(mr["title"])
+  }
+}
+
 main_microui :: proc() {
 
   curl_handle := curl.easy_init()
   defer curl.easy_cleanup(curl_handle)
-  curl.easy_setopt(curl_handle, .URL, "https://kode.ru")
+  url := "https://gitlab.com/api/v4/merge_requests"
+  curl.easy_setopt(curl_handle, .URL, url)
+  curl.easy_setopt(curl_handle, .WRITEFUNCTION, build_response)
+  resp_builder := strings.builder_make_none()
+  defer strings.builder_destroy(&resp_builder)
+  curl.easy_setopt(curl_handle, .WRITEDATA, &resp_builder)
   curl.easy_perform(curl_handle)
+
+  parse_merge_requests(resp_builder.buf[:])
 
   if err := SDL.Init({.VIDEO}); err != 0 {
     fmt.eprintln(err)
