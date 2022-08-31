@@ -63,7 +63,6 @@ parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequ
     return .Error,
   }
   defer json.destroy_value(json_data)
-  fmt.println("Parse OK")
   mr_list, ok := json_data.(json.Array)
   if !ok {
     fmt.eprintln("Expected an Array")
@@ -85,6 +84,31 @@ parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequ
     append_elem(merge_requests, mr)
   }
   return .None
+}
+
+parse_mr_changes :: proc(response: []u8) -> (changes: []string, err: Parse_Error) {
+  json_data, parse_err := json.parse(response)
+  if parse_err != .None {
+    fmt.eprintln("Failed to parse json")
+    fmt.eprintln("Parse_Error:", parse_err)
+    return nil, .Error,
+  }
+  defer json.destroy_value(json_data)
+  if mr_obj, ok := json_data.(json.Object); ok {
+    if mr_changes, ok := mr_obj["changes"].(json.Array); ok {
+      fmt.println("got changes", len(mr_changes))
+      return {}, .None
+    } else {
+      fmt.eprintln("Expected an Array")
+      return nil, .Error
+    }
+  } else {
+    fmt.eprintln("Expected an Object")
+    return nil, .Error
+  }
+}
+
+fetch_mr :: proc() {
 }
 
 main_microui :: proc() {
@@ -287,29 +311,42 @@ reset_log :: proc() {
 
 cr_windows :: proc(ctx: ^mu.Context) {
   @static opts := mu.Options{.NO_CLOSE}
-  if (mu.window(ctx, "Code Review", {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT}, opts)) {
-    if state.current_mr_index >= 0 {
-      mr := state.mr_list[state.current_mr_index]
+  if state.current_mr_index >= 0 {
+    cmd_window_width : i32 = 200
+    cmd_window_padding : i32 = 8
+    mr := state.mr_list[state.current_mr_index]
+    if mu.window(ctx, mr.title, {0, 0, WINDOW_WIDTH - cmd_window_width - cmd_window_padding, WINDOW_HEIGHT}, opts) {
       mu.layout_row(ctx, {-1})
       mu.layout_begin_column(ctx)
       mu.layout_row(ctx, {-1})
-      mu.label(ctx, mr.title)
-      mu.layout_row(ctx, {-1})
       mu.label(ctx, mr.description)
       mu.layout_row(ctx, {90})
-      if .SUBMIT in mu.button(ctx, "BACK") {
+      mu.layout_end_column(ctx)
+    }
+    if mu.window(ctx, "Actions", {WINDOW_WIDTH - cmd_window_width, 0, cmd_window_width, WINDOW_HEIGHT}, opts) {
+      mu.layout_row(ctx, {-1})
+      mu.layout_begin_column(ctx)
+      mu.layout_row(ctx, {-1})
+      if .SUBMIT in mu.button(ctx, "MR LIST") {
         state.current_mr_index = -1
       }
-      mu.layout_end_column(ctx)
-    } else if len(state.mr_list) > 0 {
       mu.layout_row(ctx, {-1})
-      mu.label(ctx, "Merge Requests")
+      if .SUBMIT in mu.button(ctx, "APPROVE") {
+      }
+      mu.layout_end_column(ctx)
+    }
+  } else if len(state.mr_list) > 0 {
+    filter_width : i32 = 200
+    filter_padding : i32 = 8
+    if mu.window(ctx, "Merge requests", {0, 0, WINDOW_WIDTH - filter_width - filter_padding, WINDOW_HEIGHT}, opts) {
       for mr, index in state.mr_list {
         mu.layout_row(ctx, {-1})
         if .SUBMIT in mu.button(ctx = ctx, label = mr.title, opt = {.EXPANDED}) {
           state.current_mr_index = index
         }
       }
+    }
+    if mu.window(ctx, "Filters", {WINDOW_WIDTH - filter_width, 0, filter_width, WINDOW_HEIGHT}, opts) {
     }
   }
 }
