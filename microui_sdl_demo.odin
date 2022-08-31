@@ -9,6 +9,9 @@ import SDL "vendor:sdl2"
 import mu "vendor:microui"
 import "curl"
 
+WINDOW_WIDTH :: 960
+WINDOW_HEIGHT :: 540
+
 state := struct {
   mu_ctx: mu.Context,
   log_buf:         [1<<16]byte,
@@ -16,9 +19,13 @@ state := struct {
   log_buf_updated: bool,
   bg: mu.Color,
 
+  mr_list: [dynamic]MergeRequest,
+  current_mr_index: int,
+
   atlas_texture: ^SDL.Texture,
 }{
   bg = {90, 95, 100, 255},
+  current_mr_index = -1
 }
 
 build_response :: proc "cdecl" (data: [^]byte, size: c.size_t, nmemb: c.size_t, userdata: rawptr) -> c.size_t {
@@ -92,9 +99,8 @@ main_microui :: proc() {
   curl.easy_setopt(curl_handle, .WRITEDATA, &resp_builder)
   curl.easy_perform(curl_handle)
 
-  merge_requests : [dynamic]MergeRequest
-  defer delete(merge_requests)
-  parse_merge_requests(resp_builder.buf[:], &merge_requests)
+  parse_merge_requests(resp_builder.buf[:], &state.mr_list)
+  defer delete(state.mr_list)
 
   if err := SDL.Init({.VIDEO}); err != 0 {
     fmt.eprintln(err)
@@ -102,7 +108,7 @@ main_microui :: proc() {
   }
   defer SDL.Quit()
 
-  window := SDL.CreateWindow("microui-odin", SDL.WINDOWPOS_UNDEFINED, SDL.WINDOWPOS_UNDEFINED, 960, 540, {.SHOWN, .RESIZABLE})
+  window := SDL.CreateWindow("microui-odin", SDL.WINDOWPOS_UNDEFINED, SDL.WINDOWPOS_UNDEFINED, WINDOW_WIDTH, WINDOW_HEIGHT, {.SHOWN, .RESIZABLE})
   if window == nil {
     fmt.eprintln(SDL.GetError())
     return
@@ -199,9 +205,7 @@ main_microui :: proc() {
     }
 
     mu.begin(ctx)
-    // fmt.println("title")
-    // fmt.println(merge_requests[0].title)
-    cr_windows(ctx, merge_requests[:])
+    cr_windows(ctx)
     //all_windows(ctx)
     mu.end(ctx)
 
@@ -281,15 +285,29 @@ reset_log :: proc() {
   state.log_buf_len = 0
 }
 
-cr_windows :: proc(ctx: ^mu.Context, merge_requests: []MergeRequest) {
+cr_windows :: proc(ctx: ^mu.Context) {
   @static opts := mu.Options{.NO_CLOSE}
-  if (mu.window(ctx, "Code Review", {0, 0, 500, 500}, opts)) {
-    if .ACTIVE in mu.header(ctx, "Merge Requests") {
-      if len(merge_requests) > 0 {
-        mu.get_layout(ctx).indent = 24
-        mu.layout_column(ctx)
-        for mr in merge_requests {
-          mu.header(ctx, mr.title)
+  if (mu.window(ctx, "Code Review", {0, 0, WINDOW_WIDTH, WINDOW_HEIGHT}, opts)) {
+    if state.current_mr_index >= 0 {
+      mr := state.mr_list[state.current_mr_index]
+      mu.layout_row(ctx, {-1})
+      mu.layout_begin_column(ctx)
+      mu.layout_row(ctx, {-1})
+      mu.label(ctx, mr.title)
+      mu.layout_row(ctx, {-1})
+      mu.label(ctx, mr.description)
+      mu.layout_row(ctx, {90})
+      if .SUBMIT in mu.button(ctx, "BACK") {
+        state.current_mr_index = -1
+      }
+      mu.layout_end_column(ctx)
+    } else if len(state.mr_list) > 0 {
+      mu.layout_row(ctx, {-1})
+      mu.label(ctx, "Merge Requests")
+      for mr, index in state.mr_list {
+        mu.layout_row(ctx, {-1})
+        if .SUBMIT in mu.button(ctx = ctx, label = mr.title, opt = {.EXPANDED}) {
+          state.current_mr_index = index
         }
       }
     }
