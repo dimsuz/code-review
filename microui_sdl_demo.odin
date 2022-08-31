@@ -37,34 +37,47 @@ User :: struct {
 MergeRequest :: struct {
   title: string,
   description: string,
-  id: int,
-  iid: int,
-  project_id: int,
-  author: User
+  id: u32,
+  iid: u32,
+  project_id: u32,
+  // author: User
 }
 
-parse_merge_requests :: proc(response: []u8) {
-  json_data, err := json.parse(response)
-  if err != .None {
+Parse_Error :: enum {
+  None,
+  Error
+}
+
+parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequest) -> (err: Parse_Error) {
+  json_data, parse_err := json.parse(response)
+  if parse_err != .None {
     fmt.eprintln("Failed to parse json")
-    fmt.eprintln("Error:", err)
-    return
+    fmt.eprintln("Parse_Error:", parse_err)
+    return .Error,
   }
   defer json.destroy_value(json_data)
   fmt.println("Parse OK")
   mr_list, ok := json_data.(json.Array)
   if !ok {
     fmt.eprintln("Expected an Array")
-    return
+    return .Error
   }
   for mr_data in mr_list {
-    mr, ok := mr_data.(json.Object)
+    mr_obj, ok := mr_data.(json.Object)
     if !ok {
       fmt.eprintln("Expected an Object")
-      return
+      return .Error
     }
-    fmt.println(mr["title"])
+    mr := MergeRequest{
+      title = strings.clone(mr_obj["title"].(string)),
+      description = strings.clone(mr_obj["description"].(string)),
+      id = u32(mr_obj["id"].(f64)),
+      iid = u32(mr_obj["iid"].(f64)),
+      project_id = u32(mr_obj["project_id"].(f64))
+    }
+    append_elem(merge_requests, mr)
   }
+  return .None
 }
 
 main_microui :: proc() {
@@ -79,7 +92,9 @@ main_microui :: proc() {
   curl.easy_setopt(curl_handle, .WRITEDATA, &resp_builder)
   curl.easy_perform(curl_handle)
 
-  parse_merge_requests(resp_builder.buf[:])
+  merge_requests : [dynamic]MergeRequest
+  defer delete(merge_requests)
+  parse_merge_requests(resp_builder.buf[:], &merge_requests)
 
   if err := SDL.Init({.VIDEO}); err != 0 {
     fmt.eprintln(err)
@@ -184,7 +199,9 @@ main_microui :: proc() {
     }
 
     mu.begin(ctx)
-    cr_windows(ctx)
+    // fmt.println("title")
+    // fmt.println(merge_requests[0].title)
+    cr_windows(ctx, merge_requests[:])
     //all_windows(ctx)
     mu.end(ctx)
 
@@ -264,10 +281,18 @@ reset_log :: proc() {
   state.log_buf_len = 0
 }
 
-cr_windows :: proc(ctx: ^mu.Context) {
+cr_windows :: proc(ctx: ^mu.Context, merge_requests: []MergeRequest) {
   @static opts := mu.Options{.NO_CLOSE}
   if (mu.window(ctx, "Code Review", {0, 0, 500, 500}, opts)) {
-    mu.header(ctx, "Pull Requests")
+    if .ACTIVE in mu.header(ctx, "Merge Requests") {
+      if len(merge_requests) > 0 {
+        mu.get_layout(ctx).indent = 24
+        mu.layout_column(ctx)
+        for mr in merge_requests {
+          mu.header(ctx, mr.title)
+        }
+      }
+    }
   }
 }
 
