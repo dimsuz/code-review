@@ -12,6 +12,9 @@ import "curl"
 WINDOW_WIDTH :: 960
 WINDOW_HEIGHT :: 540
 
+PROJECT_ID :: "1"
+PRIVATE_TOKEN :: "1"
+
 state := struct {
   mu_ctx: mu.Context,
   log_buf:         [1<<16]byte,
@@ -19,8 +22,10 @@ state := struct {
   log_buf_updated: bool,
   bg: mu.Color,
 
+  curl_handle: rawptr,
   mr_list: [dynamic]MergeRequest,
   current_mr_index: int,
+  fetch_mr_cache: map[u32]bool,
 
   atlas_texture: ^SDL.Texture,
 }{
@@ -60,6 +65,7 @@ parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequ
   if parse_err != .None {
     fmt.eprintln("Failed to parse json")
     fmt.eprintln("Parse_Error:", parse_err)
+    fmt.eprintln(strings.clone_from_bytes(response))
     return .Error,
   }
   defer json.destroy_value(json_data)
@@ -108,22 +114,35 @@ parse_mr_changes :: proc(response: []u8) -> (changes: []string, err: Parse_Error
   }
 }
 
-fetch_mr :: proc() {
+fetch_mr :: proc(iid: u32) -> (changes: []string, err: Parse_Error) {
+  url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
+  response := perform_get_request(url)
+  defer delete(response)
+  return parse_mr_changes(response)
+}
+
+perform_get_request :: proc(url: string) -> (response: []u8) {
+  curl_handle := state.curl_handle
+  curl.easy_setopt(curl_handle, .URL, url)
+  curl.easy_setopt(curl_handle, .WRITEFUNCTION, build_response)
+  resp_builder := strings.builder_make_none()
+  curl.easy_setopt(curl_handle, .WRITEDATA, &resp_builder)
+  curl.easy_perform(curl_handle)
+  return resp_builder.buf[:]
 }
 
 main_microui :: proc() {
 
-  curl_handle := curl.easy_init()
-  defer curl.easy_cleanup(curl_handle)
-  url := "https://gitlab.com/api/v4/merge_requests"
-  curl.easy_setopt(curl_handle, .URL, url)
-  curl.easy_setopt(curl_handle, .WRITEFUNCTION, build_response)
-  resp_builder := strings.builder_make_none()
-  defer strings.builder_destroy(&resp_builder)
-  curl.easy_setopt(curl_handle, .WRITEDATA, &resp_builder)
-  curl.easy_perform(curl_handle)
+  state.curl_handle = curl.easy_init()
+  defer curl.easy_cleanup(state.curl_handle)
+  state.fetch_mr_cache = make(map[u32]bool)
+  defer delete(state.fetch_mr_cache)
 
-  parse_merge_requests(resp_builder.buf[:], &state.mr_list)
+  url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
+  response := perform_get_request(url)
+  defer delete(response)
+
+  parse_merge_requests(response, &state.mr_list)
   defer delete(state.mr_list)
 
   if err := SDL.Init({.VIDEO}); err != 0 {
@@ -322,6 +341,10 @@ cr_windows :: proc(ctx: ^mu.Context) {
       mu.label(ctx, mr.description)
       mu.layout_row(ctx, {90})
       mu.layout_end_column(ctx)
+      if mr.iid not_in state.fetch_mr_cache {
+        fetch_mr(mr.iid)
+        state.fetch_mr_cache[mr.iid] = true
+      }
     }
     if mu.window(ctx, "Actions", {WINDOW_WIDTH - cmd_window_width, 0, cmd_window_width, WINDOW_HEIGHT}, opts) {
       mu.layout_row(ctx, {-1})
