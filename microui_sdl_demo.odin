@@ -5,6 +5,7 @@ import "core:c"
 import "core:runtime"
 import "core:strings"
 import "core:encoding/json"
+import "core:time"
 import SDL "vendor:sdl2"
 import mu "vendor:microui"
 import "curl"
@@ -14,6 +15,16 @@ WINDOW_HEIGHT :: 540
 
 PROJECT_ID :: "1"
 PRIVATE_TOKEN :: "1"
+
+@(deferred_in_out=print_duration)
+scoped_measure_duration :: proc(label: string) -> time.Tick {
+  return time.tick_now()
+}
+
+print_duration :: proc(label: string, start: time.Tick) {
+  duration := time.tick_since(start)
+  fmt.println(label, duration)
+}
 
 state := struct {
   mu_ctx: mu.Context,
@@ -55,6 +66,29 @@ MergeRequest :: struct {
   // author: User
 }
 
+Changes :: struct {
+  old_path: []string,
+  new_path: []string,
+  new_file: []bool,
+  diff: []string,
+}
+
+make_changes :: proc(count: int) -> Changes {
+  return Changes{
+    old_path = make([]string, count),
+    new_path = make([]string, count),
+    new_file = make([]bool, count),
+    diff = make([]string, count),
+  }
+}
+
+destroy_changes :: proc(value: Changes) {
+  delete(value.old_path)
+  delete(value.new_path)
+  delete(value.new_file)
+  delete(value.diff)
+}
+
 Parse_Error :: enum {
   None,
   Error
@@ -92,29 +126,57 @@ parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequ
   return .None
 }
 
-parse_mr_changes :: proc(response: []u8) -> (changes: []string, err: Parse_Error) {
+parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error) {
+  scoped_measure_duration("parsing changes: ")
+  changes = make_changes(0)
+  err = .Error
   json_data, parse_err := json.parse(response)
   if parse_err != .None {
     fmt.eprintln("Failed to parse json")
     fmt.eprintln("Parse_Error:", parse_err)
-    return nil, .Error,
+    return
   }
   defer json.destroy_value(json_data)
-  if mr_obj, ok := json_data.(json.Object); ok {
-    if mr_changes, ok := mr_obj["changes"].(json.Array); ok {
-      fmt.println("got changes", len(mr_changes))
-      return {}, .None
-    } else {
-      fmt.eprintln("Expected an Array")
-      return nil, .Error
-    }
-  } else {
+  ok: bool
+  mr_obj: json.Object
+  if mr_obj, ok = json_data.(json.Object); !ok {
     fmt.eprintln("Expected an Object")
-    return nil, .Error
+    return
   }
+  mr_changes: json.Array
+  if mr_changes, ok = mr_obj["changes"].(json.Array); !ok {
+    fmt.eprintln("Expected an Array")
+    return
+  }
+  changes = make_changes(count = len(mr_changes))
+  for json_change, i in mr_changes {
+    v : json.Object
+    if v, ok = json_change.(json.Object); !ok {
+      fmt.eprintln("Expected an Object")
+      return
+    }
+    if changes.old_path[i], ok = v["old_path"].(string); !ok {
+      fmt.eprintln("Expected a string at changes i=", i)
+      return
+    }
+    if changes.new_path[i], ok = v["new_path"].(string); !ok {
+      fmt.eprintln("Expected a string at changes i=", i)
+      return
+    }
+    if changes.new_file[i], ok = v["new_file"].(bool); !ok {
+      fmt.eprintln("Expected a bool at changes i=", i)
+      return
+    }
+    if changes.diff[i], ok = v["diff"].(string); !ok {
+      fmt.eprintln("Expected a string at changes i=", i)
+      return
+    }
+  }
+  fmt.println("parsed changes", len(mr_changes))
+  return changes, .None
 }
 
-fetch_mr :: proc(iid: u32) -> (changes: []string, err: Parse_Error) {
+fetch_mr :: proc(iid: u32) -> (changes: Changes, err: Parse_Error) {
   url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
   response := perform_get_request(url)
   defer delete(response)
@@ -122,6 +184,7 @@ fetch_mr :: proc(iid: u32) -> (changes: []string, err: Parse_Error) {
 }
 
 perform_get_request :: proc(url: string) -> (response: []u8) {
+  scoped_measure_duration(fmt.tprintf("perform GET %s: ", url))
   curl_handle := state.curl_handle
   curl.easy_setopt(curl_handle, .URL, url)
   curl.easy_setopt(curl_handle, .WRITEFUNCTION, build_response)
