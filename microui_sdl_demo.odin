@@ -36,7 +36,7 @@ state := struct {
   curl_handle: rawptr,
   mr_list: [dynamic]MergeRequest,
   current_mr_index: int,
-  fetch_mr_cache: map[u32]bool,
+  fetch_mr_cache: map[u32]Changes,
 
   atlas_texture: ^SDL.Texture,
 }{
@@ -151,26 +151,34 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
   changes = make_changes(count = len(mr_changes))
   for json_change, i in mr_changes {
     v : json.Object
+    old_path : string
+    new_path : string
+    new_file : bool
+    diff : string
     if v, ok = json_change.(json.Object); !ok {
       fmt.eprintln("Expected an Object")
       return
     }
-    if changes.old_path[i], ok = v["old_path"].(string); !ok {
+    if old_path, ok = v["old_path"].(string); !ok {
       fmt.eprintln("Expected a string at changes i=", i)
       return
     }
-    if changes.new_path[i], ok = v["new_path"].(string); !ok {
+    if new_path, ok = v["new_path"].(string); !ok {
       fmt.eprintln("Expected a string at changes i=", i)
       return
     }
-    if changes.new_file[i], ok = v["new_file"].(bool); !ok {
+    if new_file, ok = v["new_file"].(bool); !ok {
       fmt.eprintln("Expected a bool at changes i=", i)
       return
     }
-    if changes.diff[i], ok = v["diff"].(string); !ok {
+    if diff, ok = v["diff"].(string); !ok {
       fmt.eprintln("Expected a string at changes i=", i)
       return
     }
+    changes.old_path[i] = strings.clone(old_path)
+    changes.new_path[i] = strings.clone(new_path)
+    changes.new_file[i] = new_file
+    changes.diff[i] = strings.clone(diff)
   }
   fmt.println("parsed changes", len(mr_changes))
   return changes, .None
@@ -198,7 +206,7 @@ main_microui :: proc() {
 
   state.curl_handle = curl.easy_init()
   defer curl.easy_cleanup(state.curl_handle)
-  state.fetch_mr_cache = make(map[u32]bool)
+  state.fetch_mr_cache = make(map[u32]Changes)
   defer delete(state.fetch_mr_cache)
 
   url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
@@ -402,11 +410,25 @@ cr_windows :: proc(ctx: ^mu.Context) {
       mu.layout_begin_column(ctx)
       mu.layout_row(ctx, {-1})
       mu.label(ctx, mr.description)
-      mu.layout_row(ctx, {90})
       mu.layout_end_column(ctx)
       if mr.iid not_in state.fetch_mr_cache {
-        fetch_mr(mr.iid)
-        state.fetch_mr_cache[mr.iid] = true
+        changes, err := fetch_mr(mr.iid)
+        state.fetch_mr_cache[mr.iid] = changes
+      }
+      if changes, ok := state.fetch_mr_cache[mr.iid]; ok {
+        mu.layout_row(ctx, {-1})
+        mu.layout_begin_column(ctx)
+        for diff, i in changes.diff {
+            mu.layout_row(ctx, {-1})
+          mu.text(ctx, diff)
+        // mu.layout_begin_column(ctx)
+        //     mu.layout_row(ctx, {-1}, -1)
+        //     mu.button(ctx, "hello")
+        //     mu.layout_row(ctx, {-1}, -1)
+        //     mu.button(ctx, "hello 2")
+        // mu.layout_end_column(ctx)
+        }
+        mu.layout_end_column(ctx)
       }
     }
     if mu.window(ctx, "Actions", {WINDOW_WIDTH - cmd_window_width, 0, cmd_window_width, WINDOW_HEIGHT}, opts) {
