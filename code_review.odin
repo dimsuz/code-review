@@ -2,8 +2,10 @@ package main
 
 import "core:mem"
 import "core:log"
+import "core:fmt"
 import "core:strings"
 import "core:runtime"
+import "curl"
 
 import sdl "vendor:sdl2"
 import gl  "vendor:OpenGL"
@@ -15,6 +17,67 @@ import imsdl "../odin-imgui/impl/sdl"
 DESIRED_GL_MAJOR_VERSION :: 4
 DESIRED_GL_MINOR_VERSION :: 5
 
+PROJECT_ID :: "1"
+PRIVATE_TOKEN :: "1"
+
+State :: union #no_nil {
+  Loading,
+  MR_List,
+  MR_Changes
+}
+
+Loading :: string
+
+MR_List :: struct {
+  mr_list: []MergeRequest,
+}
+
+MR_Changes :: struct {
+  mr: MergeRequest,
+  fetch_cache: map[u32]Changes,
+}
+
+User :: struct {
+  id: int,
+  username: string,
+  name: string,
+  avatar_url: string
+}
+
+MergeRequest :: struct {
+  title: string,
+  description: string,
+  id: u32,
+  iid: u32,
+  project_id: u32,
+  // author: User
+}
+
+Changes :: struct {
+  old_path: []string,
+  new_path: []string,
+  new_file: []bool,
+  diff: []string,
+}
+
+make_changes :: proc(count: int) -> Changes {
+  return Changes{
+    old_path = make([]string, count),
+    new_path = make([]string, count),
+    new_file = make([]bool, count),
+    diff = make([]string, count),
+  }
+}
+
+destroy_changes :: proc(value: Changes) {
+  delete(value.old_path)
+  delete(value.new_path)
+  delete(value.new_file)
+  delete(value.diff)
+}
+
+app_state : State = "Loading..."
+
 main :: proc() {
   logger_opts := log.Options {
       .Level,
@@ -23,12 +86,15 @@ main :: proc() {
   }
   context.logger = log.create_console_logger(opt = logger_opts)
 
+  init_network()
+  defer destroy_network()
+
   log.info("Starting SDL Example...")
   init_err := sdl.Init({.VIDEO})
   defer sdl.Quit()
   if init_err == 0 {
     log.info("Setting up the window...")
-    window := sdl.CreateWindow("odin-imgui SDL+OpenGL example", 100, 100, 1280, 720, { .OPENGL, .MOUSE_FOCUS, .SHOWN, .RESIZABLE})
+    window := sdl.CreateWindow("Code Review", 100, 100, 1280, 720, { .OPENGL, .MOUSE_FOCUS, .SHOWN, .RESIZABLE})
     if window == nil {
       log.debugf("Error during window creation: %s", sdl.GetError())
       sdl.Quit()
@@ -57,11 +123,19 @@ main :: proc() {
     gl.load_up_to(DESIRED_GL_MAJOR_VERSION, DESIRED_GL_MINOR_VERSION, sdl.gl_set_proc_address)
     gl.ClearColor(0.25, 0.25, 0.25, 1)
 
+    url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
+    response := perform_get_request(url)
+    defer delete(response)
+    mr_list: [dynamic]MergeRequest
+    parse_merge_requests(response, &mr_list)
+    defer delete(mr_list)
+
+    app_state = MR_List{mr_list = mr_list[:]}
+
     imgui_state := init_imgui_state(window)
 
     running := true
     show_demo_window := false
-    load_font := true
     e := sdl.Event{}
     for running {
       for sdl.PollEvent(&e) {
@@ -88,14 +162,21 @@ main :: proc() {
 
       imgui_new_frame(window, &imgui_state)
       imgui.new_frame()
+      app_state = app_state
       {
-        info_overlay()
-
         if show_demo_window do imgui.show_demo_window(&show_demo_window)
-        text_test_window()
-        input_text_test_window()
-        misc_test_window()
-        combo_test_window()
+        switch s in app_state {
+        case Loading:
+          render_loading(s)
+        case MR_List:
+          render_mr_list(s)
+        case MR_Changes:
+          render_mr_changes(s)
+        }
+        // text_test_window()
+        // input_text_test_window()
+        // misc_test_window()
+        // combo_test_window()
       }
       imgui.render()
 
@@ -224,4 +305,41 @@ imgui_new_frame :: proc(window: ^sdl.Window, state: ^Imgui_State) {
   imsdl.update_display_size(window)
   imsdl.update_mouse(&state.sdl_state, window)
   imsdl.update_dt(&state.sdl_state)
+}
+
+render_loading :: proc(state: Loading) {
+  ds := imgui.get_io().display_size
+  imgui.set_next_window_pos(pos = div(ds, 2), pivot = imgui.Vec2{0.5, 0.5})
+  imgui.set_next_window_bg_alpha(0.2)
+  overlay_flags: imgui.Window_Flags = .NoDecoration |
+    .AlwaysAutoResize |
+    .NoSavedSettings |
+    .NoFocusOnAppearing |
+    .NoNav |
+    .NoMove
+  imgui.begin("Info", nil, overlay_flags)
+  imgui.text_unformatted(state)
+  imgui.end()
+}
+
+render_mr_list :: proc(state: MR_List) {
+  ds := imgui.get_io().display_size
+  flags: imgui.Window_Flags = .NoSavedSettings |
+    .NoNav |
+    .NoMove |
+    .NoResize |
+    .NoCollapse
+  imgui.set_next_window_pos(pos = imgui.Vec2{0, 0})
+  imgui.set_next_window_size(ds)
+  imgui.begin("Merge Requests", nil, flags)
+  if imgui.begin_list_box("##mr_list", imgui.Vec2{-1, -1}) {
+    for mr in state.mr_list {
+      imgui.selectable(mr.title)
+    }
+    imgui.end_list_box()
+  }
+  imgui.end()
+}
+
+render_mr_changes :: proc(state: MR_Changes) {
 }

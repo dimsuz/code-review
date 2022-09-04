@@ -1,4 +1,4 @@
-package main
+package microui
 
 import "core:fmt"
 import "core:c"
