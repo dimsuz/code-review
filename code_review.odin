@@ -22,11 +22,23 @@ PRIVATE_TOKEN :: "1"
 
 State :: union #no_nil {
   Loading,
+  Error,
   MR_List,
-  MR_Changes
+  MR_Changes_Loading,
+  MR_Changes,
 }
 
-Loading :: string
+Loading :: struct {
+  text: string
+}
+
+Error :: struct {
+  text: string
+}
+
+MR_Changes_Loading :: struct {
+  mr: MergeRequest
+}
 
 MR_List :: struct {
   mr_list: []MergeRequest,
@@ -34,7 +46,11 @@ MR_List :: struct {
 
 MR_Changes :: struct {
   mr: MergeRequest,
-  fetch_cache: map[u32]Changes,
+  changes: Changes,
+}
+
+destroy_state :: proc (state: State) {
+  // TODO (!) switch to destroy state
 }
 
 User :: struct {
@@ -76,7 +92,8 @@ destroy_changes :: proc(value: Changes) {
   delete(value.diff)
 }
 
-app_state : State = "Loading..."
+app_state : State = Loading{"Loading..."}
+mr_list_state : Maybe(State) = nil
 
 main :: proc() {
   logger_opts := log.Options {
@@ -162,23 +179,38 @@ main :: proc() {
 
       imgui_new_frame(window, &imgui_state)
       imgui.new_frame()
-      app_state = app_state
-      {
-        if show_demo_window do imgui.show_demo_window(&show_demo_window)
-        switch s in app_state {
-        case Loading:
-          render_loading(s)
-        case MR_List:
-          render_mr_list(s)
-        case MR_Changes:
-          render_mr_changes(s)
-        }
-        // text_test_window()
-        // input_text_test_window()
-        // misc_test_window()
-        // combo_test_window()
+      new_state : Maybe(State) = nil
+      if show_demo_window do imgui.show_demo_window(&show_demo_window)
+      switch s in app_state {
+      case Loading:
+        render_loading(s)
+      case Error:
+        render_error(s)
+      case MR_List:
+        new_state = render_mr_list(s)
+      case MR_Changes_Loading:
+        new_state = render_mr_changes_loading(s)
+      case MR_Changes:
+        new_state = render_mr_changes(s)
       }
+      // text_test_window()
+      // input_text_test_window()
+      // misc_test_window()
+      // combo_test_window()
       imgui.render()
+
+      if new_state != nil {
+        old_state := app_state
+        app_state = new_state.?
+        // TODO add some kind of backstack management? or cache. remember states until they are not needed, only then destroy and free
+        // currently mr_list_state is a crudely made static var exception to avoid refetching list on every details-and-back interaction
+        ok : bool
+        if mm, ok := old_state.(MR_List); ok {
+          mr_list_state = mm
+        } else {
+          destroy_state(old_state)
+        }
+      }
 
       io := imgui.get_io()
       gl.Viewport(0, 0, i32(io.display_size.x), i32(io.display_size.y))
@@ -291,8 +323,14 @@ init_imgui_state :: proc(window: ^sdl.Window) -> Imgui_State {
   imgui.create_context()
   imgui.style_colors_dark()
   io := imgui.get_io()
+  ranges : imgui.Im_Vector(imgui.Wchar)
+  builder : imgui.Font_Glyph_Ranges_Builder
+  imgui.font_glyph_ranges_builder_clear(&builder)
+  imgui.font_glyph_ranges_builder_add_ranges(&builder, imgui.font_atlas_get_glyph_ranges_cyrillic(io.fonts))
+  imgui.font_glyph_ranges_builder_build_ranges(&builder, &ranges)
   imgui.font_atlas_clear_fonts(io.fonts)
-  imgui.font_atlas_add_font_from_file_ttf(io.fonts, "font/JetBrainsMonoNL-Regular.ttf", 20.0)
+  imgui.font_atlas_add_font_from_file_ttf(io.fonts, "font/JetBrainsMonoNL-Regular.ttf", 20.0, nil, ranges.data)
+  imgui.font_atlas_build(io.fonts)
 
   imsdl.setup_state(&res.sdl_state)
 
@@ -318,11 +356,27 @@ render_loading :: proc(state: Loading) {
     .NoNav |
     .NoMove
   imgui.begin("Info", nil, overlay_flags)
-  imgui.text_unformatted(state)
+  imgui.text_unformatted(state.text)
   imgui.end()
 }
 
-render_mr_list :: proc(state: MR_List) {
+render_error :: proc(state: Error) {
+  ds := imgui.get_io().display_size
+  imgui.set_next_window_pos(pos = div(ds, 2), pivot = imgui.Vec2{0.5, 0.5})
+  imgui.set_next_window_bg_alpha(0.2)
+  overlay_flags: imgui.Window_Flags = .NoDecoration |
+    .AlwaysAutoResize |
+    .NoSavedSettings |
+    .NoFocusOnAppearing |
+    .NoNav |
+    .NoMove
+  imgui.begin("Error", nil, overlay_flags)
+  imgui.text_unformatted(state.text)
+  imgui.end()
+}
+
+render_mr_list :: proc(state: MR_List) -> (new_state: Maybe(State)) {
+  new_state = nil
   ds := imgui.get_io().display_size
   flags: imgui.Window_Flags = .NoSavedSettings |
     .NoNav |
@@ -334,12 +388,44 @@ render_mr_list :: proc(state: MR_List) {
   imgui.begin("Merge Requests", nil, flags)
   if imgui.begin_list_box("##mr_list", imgui.Vec2{-1, -1}) {
     for mr in state.mr_list {
-      imgui.selectable(mr.title)
+      if imgui.selectable(mr.title) {
+        new_state = MR_Changes_Loading{mr}
+      }
     }
     imgui.end_list_box()
   }
   imgui.end()
+  return
 }
 
-render_mr_changes :: proc(state: MR_Changes) {
+render_mr_changes_loading :: proc(state: MR_Changes_Loading) -> (new_state: Maybe(State)) {
+  url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, state.mr.iid, PRIVATE_TOKEN)
+  response := perform_get_request(url)
+  defer delete(response)
+  if changes, err := parse_mr_changes(response); err == .None {
+    return MR_Changes{mr = state.mr, changes = changes}
+  } else {
+    return Error{fmt.aprintf("Error: %s", err)}
+  }
+}
+
+render_mr_changes :: proc(state: MR_Changes) -> (new_state: Maybe(State)) {
+  using state
+  new_state = nil
+  ds := imgui.get_io().display_size
+  flags: imgui.Window_Flags = .NoSavedSettings |
+    .NoNav |
+    .NoMove |
+    .NoResize |
+    .NoCollapse
+  imgui.set_next_window_pos(pos = imgui.Vec2{0, 0})
+  imgui.set_next_window_size(ds)
+  imgui.begin(mr.title, nil, flags)
+  if imgui.button("BACK") {
+    log.info("click")
+    new_state = mr_list_state
+  }
+  imgui.text_unformatted(changes.diff[0])
+  imgui.end()
+  return
 }
