@@ -20,37 +20,19 @@ DESIRED_GL_MINOR_VERSION :: 5
 PROJECT_ID :: "1"
 PRIVATE_TOKEN :: "1"
 
-State :: union #no_nil {
+State :: struct {
+  mr_list: [dynamic]MergeRequest,
+  mr_changes: map[int]Changes,
+  current_mr_index: int,
+  screen: Screen,
+  error: string,
+}
+
+Screen :: enum {
   Loading,
   Error,
   MR_List,
-  MR_Changes_Loading,
   MR_Changes,
-}
-
-Loading :: struct {
-  text: string
-}
-
-Error :: struct {
-  text: string
-}
-
-MR_Changes_Loading :: struct {
-  mr: MergeRequest
-}
-
-MR_List :: struct {
-  mr_list: []MergeRequest,
-}
-
-MR_Changes :: struct {
-  mr: MergeRequest,
-  changes: Changes,
-}
-
-destroy_state :: proc (state: State) {
-  // TODO (!) switch to destroy state
 }
 
 User :: struct {
@@ -92,8 +74,7 @@ destroy_changes :: proc(value: Changes) {
   delete(value.diff)
 }
 
-app_state : State = Loading{"Loading..."}
-mr_list_state : Maybe(State) = nil
+app_state : State
 
 main :: proc() {
   logger_opts := log.Options {
@@ -140,14 +121,14 @@ main :: proc() {
     gl.load_up_to(DESIRED_GL_MAJOR_VERSION, DESIRED_GL_MINOR_VERSION, sdl.gl_set_proc_address)
     gl.ClearColor(0.25, 0.25, 0.25, 1)
 
+    app_state.screen = .Loading
+
     url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
     response := perform_get_request(url)
     defer delete(response)
-    mr_list: [dynamic]MergeRequest
-    parse_merge_requests(response, &mr_list)
-    defer delete(mr_list)
+    parse_merge_requests(response, &app_state.mr_list)
 
-    app_state = MR_List{mr_list = mr_list[:]}
+    app_state.screen = .MR_List
 
     imgui_state := init_imgui_state(window)
 
@@ -179,38 +160,30 @@ main :: proc() {
 
       imgui_new_frame(window, &imgui_state)
       imgui.new_frame()
-      new_state : Maybe(State) = nil
       if show_demo_window do imgui.show_demo_window(&show_demo_window)
-      switch s in app_state {
-      case Loading:
-        render_loading(s)
-      case Error:
-        render_error(s)
-      case MR_List:
-        new_state = render_mr_list(s)
-      case MR_Changes_Loading:
-        new_state = render_mr_changes_loading(s)
-      case MR_Changes:
-        new_state = render_mr_changes(s)
+      switch app_state.screen {
+      case .Loading:
+        render_loading()
+      case .Error:
+        render_error(app_state.error)
+      case .MR_List:
+        if index := render_mr_list(app_state.mr_list[:]); index != nil {
+          fetch_mr_changes(&app_state, index.?)
+        }
+      case .MR_Changes:
+        title := app_state.mr_list[app_state.current_mr_index].title
+        changes := app_state.mr_changes[app_state.current_mr_index]
+        switch render_mr_changes(title, changes) {
+        case .BACK:
+          app_state.screen = .MR_List
+        case .NONE:
+        }
       }
       // text_test_window()
       // input_text_test_window()
       // misc_test_window()
       // combo_test_window()
       imgui.render()
-
-      if new_state != nil {
-        old_state := app_state
-        app_state = new_state.?
-        // TODO add some kind of backstack management? or cache. remember states until they are not needed, only then destroy and free
-        // currently mr_list_state is a crudely made static var exception to avoid refetching list on every details-and-back interaction
-        ok : bool
-        if mm, ok := old_state.(MR_List); ok {
-          mr_list_state = mm
-        } else {
-          destroy_state(old_state)
-        }
-      }
 
       io := imgui.get_io()
       gl.Viewport(0, 0, i32(io.display_size.x), i32(io.display_size.y))
@@ -345,7 +318,7 @@ imgui_new_frame :: proc(window: ^sdl.Window, state: ^Imgui_State) {
   imsdl.update_dt(&state.sdl_state)
 }
 
-render_loading :: proc(state: Loading) {
+render_loading :: proc() {
   ds := imgui.get_io().display_size
   imgui.set_next_window_pos(pos = div(ds, 2), pivot = imgui.Vec2{0.5, 0.5})
   imgui.set_next_window_bg_alpha(0.2)
@@ -356,11 +329,11 @@ render_loading :: proc(state: Loading) {
     .NoNav |
     .NoMove
   imgui.begin("Info", nil, overlay_flags)
-  imgui.text_unformatted(state.text)
+  imgui.text_unformatted("Loading...")
   imgui.end()
 }
 
-render_error :: proc(state: Error) {
+render_error :: proc(error: string) {
   ds := imgui.get_io().display_size
   imgui.set_next_window_pos(pos = div(ds, 2), pivot = imgui.Vec2{0.5, 0.5})
   imgui.set_next_window_bg_alpha(0.2)
@@ -371,12 +344,11 @@ render_error :: proc(state: Error) {
     .NoNav |
     .NoMove
   imgui.begin("Error", nil, overlay_flags)
-  imgui.text_unformatted(state.text)
+  imgui.text_unformatted(error)
   imgui.end()
 }
 
-render_mr_list :: proc(state: MR_List) -> (new_state: Maybe(State)) {
-  new_state = nil
+render_mr_list :: proc(mr_list: []MergeRequest) -> (selected_index: Maybe(int)) {
   ds := imgui.get_io().display_size
   flags: imgui.Window_Flags = .NoSavedSettings |
     .NoNav |
@@ -387,9 +359,9 @@ render_mr_list :: proc(state: MR_List) -> (new_state: Maybe(State)) {
   imgui.set_next_window_size(ds)
   imgui.begin("Merge Requests", nil, flags)
   if imgui.begin_list_box("##mr_list", imgui.Vec2{-1, -1}) {
-    for mr in state.mr_list {
+    for mr, index in mr_list {
       if imgui.selectable(mr.title) {
-        new_state = MR_Changes_Loading{mr}
+        selected_index = index
       }
     }
     imgui.end_list_box()
@@ -398,20 +370,31 @@ render_mr_list :: proc(state: MR_List) -> (new_state: Maybe(State)) {
   return
 }
 
-render_mr_changes_loading :: proc(state: MR_Changes_Loading) -> (new_state: Maybe(State)) {
-  url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, state.mr.iid, PRIVATE_TOKEN)
-  response := perform_get_request(url)
-  defer delete(response)
-  if changes, err := parse_mr_changes(response); err == .None {
-    return MR_Changes{mr = state.mr, changes = changes}
+fetch_mr_changes :: proc(state: ^State, index: int) {
+  using state
+  if index in mr_changes {
+    screen = .MR_Changes
+    current_mr_index = index
   } else {
-    return Error{fmt.aprintf("Error: %s", err)}
+    iid := mr_list[index].iid
+    url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
+    response := perform_get_request(url)
+    defer delete(response)
+    if changes, err := parse_mr_changes(response); err == .None {
+      screen = .MR_Changes
+      mr_changes[index] = changes
+      current_mr_index = index
+    } else {
+      screen = .Error
+      error = fmt.aprintf("Error: %s", err)
+    }
   }
 }
 
-render_mr_changes :: proc(state: MR_Changes) -> (new_state: Maybe(State)) {
-  using state
-  new_state = nil
+MR_Changes_Action :: enum { BACK, NONE }
+
+render_mr_changes :: proc(title: string, changes: Changes) -> (action: MR_Changes_Action) {
+  action = .NONE
   ds := imgui.get_io().display_size
   flags: imgui.Window_Flags = .NoSavedSettings |
     .NoNav |
@@ -420,10 +403,9 @@ render_mr_changes :: proc(state: MR_Changes) -> (new_state: Maybe(State)) {
     .NoCollapse
   imgui.set_next_window_pos(pos = imgui.Vec2{0, 0})
   imgui.set_next_window_size(ds)
-  imgui.begin(mr.title, nil, flags)
+  imgui.begin(title, nil, flags)
   if imgui.button("BACK") {
-    log.info("click")
-    new_state = mr_list_state
+    action = .BACK
   }
   imgui.text_unformatted(changes.diff[0])
   imgui.end()
