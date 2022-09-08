@@ -5,6 +5,9 @@ import "core:log"
 import "core:fmt"
 import "core:strings"
 import "core:runtime"
+import "core:sync"
+import "core:thread"
+import "core:time"
 import "curl"
 
 import sdl "vendor:sdl2"
@@ -75,6 +78,24 @@ destroy_changes :: proc(value: Changes) {
 }
 
 app_state : State
+app_state_mutex : sync.Mutex
+
+fetch_mr_list :: proc (_: ^thread.Thread) {
+  url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
+  response := perform_get_request(url)
+  defer delete(response)
+
+  // TODO only lock while writing to mr_list, not while parsing?
+  sync.mutex_lock(&app_state_mutex)
+  err := parse_merge_requests(response, &app_state.mr_list)
+  if err != .None {
+    app_state.error = "Failed to parse MR list"
+    app_state.screen = .Error
+  } else {
+    app_state.screen = .MR_List
+  }
+  sync.mutex_unlock(&app_state_mutex)
+}
 
 main :: proc() {
   logger_opts := log.Options {
@@ -123,12 +144,7 @@ main :: proc() {
 
     app_state.screen = .Loading
 
-    url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests?state=opened&private_token=%s", PROJECT_ID, PRIVATE_TOKEN)
-    response := perform_get_request(url)
-    defer delete(response)
-    parse_merge_requests(response, &app_state.mr_list)
-
-    app_state.screen = .MR_List
+    thread.create_and_start(fetch_mr_list)
 
     imgui_state := init_imgui_state(window)
 
@@ -161,14 +177,22 @@ main :: proc() {
       imgui_new_frame(window, &imgui_state)
       imgui.new_frame()
       if show_demo_window do imgui.show_demo_window(&show_demo_window)
-      switch app_state.screen {
+
+      sync.mutex_lock(&app_state_mutex)
+      screen := app_state.screen
+      sync.mutex_unlock(&app_state_mutex)
+
+      switch screen {
       case .Loading:
         render_loading()
       case .Error:
         render_error(app_state.error)
       case .MR_List:
-        if index := render_mr_list(app_state.mr_list[:]); index != nil {
-          fetch_mr_changes(&app_state, index.?)
+        sync.mutex_lock(&app_state_mutex)
+        mr_list := app_state.mr_list[:]
+        sync.mutex_unlock(&app_state_mutex)
+        if index := render_mr_list(mr_list[:]); index != nil {
+          thread.create_and_start_with_poly_data(index.?, fetch_mr_changes)
         }
       case .MR_Changes:
         title := app_state.mr_list[app_state.current_mr_index].title
@@ -370,24 +394,34 @@ render_mr_list :: proc(mr_list: []MergeRequest) -> (selected_index: Maybe(int)) 
   return
 }
 
-fetch_mr_changes :: proc(state: ^State, index: int) {
-  using state
-  if index in mr_changes {
-    screen = .MR_Changes
-    current_mr_index = index
+fetch_mr_changes :: proc(index: int) {
+  sync.mutex_lock(&app_state_mutex)
+  if index in app_state.mr_changes {
+    app_state.screen = .MR_Changes
+    app_state.current_mr_index = index
+    sync.mutex_unlock(&app_state_mutex)
   } else {
-    iid := mr_list[index].iid
+    app_state.screen = .Loading
+    iid := app_state.mr_list[index].iid
+    sync.mutex_unlock(&app_state_mutex)
+
     url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
     response := perform_get_request(url)
     defer delete(response)
-    if changes, err := parse_mr_changes(response); err == .None {
-      screen = .MR_Changes
-      mr_changes[index] = changes
-      current_mr_index = index
+
+    // TODO it seems that changes are copied: created in parse_mr_changes and then copyed upon return.
+    // they can be quite memory heavy, fix this (if true)!
+    changes, err := parse_mr_changes(response)
+    sync.mutex_lock(&app_state_mutex)
+    if err == .None {
+      app_state.screen = .MR_Changes
+      app_state.mr_changes[index] = changes
+      app_state.current_mr_index = index
     } else {
-      screen = .Error
-      error = fmt.aprintf("Error: %s", err)
+      app_state.screen = .Error
+      app_state.error = fmt.aprintf("Error: %s", err)
     }
+    sync.mutex_unlock(&app_state_mutex)
   }
 }
 
