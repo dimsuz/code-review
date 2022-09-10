@@ -441,7 +441,20 @@ render_mr_changes :: proc(title: string, changes: Changes) -> (action: MR_Change
   if imgui.button("BACK") {
     action = .BACK
   }
-  imgui.text_unformatted(changes.diff[0])
+  for i in 0..<len(changes.diff) {
+    render_mr_change(i, changes)
+  }
   imgui.end()
   return
+}
+
+render_mr_change :: proc (index: int, changes: Changes) {
+  flags: imgui.Table_Flags = .Borders | .RowBg
+  imgui.push_style_color(.TableRowBg, imgui.get_style().colors[imgui.Col.TableRowBgAlt])
+  if imgui.begin_table("change", 1, flags) {
+    imgui.table_next_column()
+    imgui.text_unformatted(changes.diff[index])
+    imgui.end_table()
+  }
+  imgui.pop_style_color()
 }
