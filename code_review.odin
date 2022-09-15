@@ -61,6 +61,11 @@ Changes :: struct {
   diff: []string,
 }
 
+Comment :: struct {
+  line: int,
+  text: string,
+}
+
 make_changes :: proc(count: int) -> Changes {
   return Changes{
     old_path = make([]string, count),
@@ -405,21 +410,30 @@ fetch_mr_changes :: proc(index: int) {
     iid := app_state.mr_list[index].iid
     sync.mutex_unlock(&app_state_mutex)
 
-    url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
-    response := perform_get_request(url)
-    defer delete(response)
+    changes_url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
+    changes_response := perform_get_request(changes_url)
+    defer delete(changes_response)
+
+    // TODO add proper pagination instead of maxing out at 100 comments
+    comments_url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/notes?per_page=100&private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
+    comments_response := perform_get_request(comments_url)
+    defer delete(comments_response)
 
     // TODO it seems that changes are copied: created in parse_mr_changes and then copyed upon return.
-    // they can be quite memory heavy, fix this (if true)!
-    changes, err := parse_mr_changes(response)
+    // they can be quite memory heavy, fix this (if true)! UPD: Yes, rework them to #soa as done with comments
+    changes, changes_err := parse_mr_changes(changes_response)
+    // TODO figure out when to call delete_soa(comments)
+    comments: #soa[dynamic]Comment
+    comments_err := parse_mr_comments(comments_response, &comments)
+
     sync.mutex_lock(&app_state_mutex)
-    if err == .None {
+    if changes_err == .None && comments_err == .None {
       app_state.screen = .MR_Changes
       app_state.mr_changes[index] = changes
       app_state.current_mr_index = index
     } else {
       app_state.screen = .Error
-      app_state.error = fmt.aprintf("Error: %s", err)
+      app_state.error = fmt.aprintf("Error Changes: %s, Error Comments: %s", changes_err, comments_err)
     }
     sync.mutex_unlock(&app_state_mutex)
   }
