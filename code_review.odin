@@ -370,19 +370,39 @@ render_mr_changes :: proc(title: string, changes: Changes) -> (action: MR_Change
     action = .BACK
   }
   for i in 0..<len(changes.diff) {
+    // TODO use IsRectVisible to test if change is in fact required to be submitted
     render_mr_change(i, changes)
   }
   imgui.end()
   return
 }
 
+callback1 :: proc "cdecl" (data: ^imgui.Input_Text_Callback_Data) -> int {
+  return 0
+}
+
 render_mr_change :: proc (index: int, changes: Changes) {
   flags: imgui.Table_Flags = .Borders | .RowBg
   imgui.push_style_color(.TableRowBg, imgui.get_style().colors[imgui.Col.TableRowBgAlt])
-  if imgui.begin_table("change", 1, flags) {
-    imgui.table_next_column()
-    imgui.text_unformatted(changes.diff[index])
+  lines := strings.split(changes.diff[index], "\n")
+  if imgui.begin_table("change", 2, flags) {
+    imgui.table_setup_column("action", imgui.Table_Column_Flags.WidthFixed, 32)
+    for line, li in lines {
+      imgui.table_next_column()
+      imgui.button("v")
+      imgui.table_next_column()
+      imgui.text_unformatted(line)
+      @static text := "hello"
+      if index == 0 && li == 3 {
+        if imgui.collapsing_header("Comment by dz") {
+          imgui.text_unformatted("Long comment\nС несколькими смыслами")
+          imgui.text_unformatted(text)
+          imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
+        }
+      }
+    }
     imgui.end_table()
   }
   imgui.pop_style_color()
+  return
 }
