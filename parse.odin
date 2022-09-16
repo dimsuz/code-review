@@ -43,7 +43,7 @@ parse_merge_requests :: proc(response: []u8, merge_requests: ^[dynamic]MergeRequ
 }
 
 parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error) {
-  scoped_measure_duration("parsing changes: ")
+  scoped_measure_duration("Parse changes: ")
   changes = make_changes(0)
   err = .Error
   json_data, parse_err := json.parse(response)
@@ -98,4 +98,72 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
   }
   fmt.println("parsed changes", len(mr_changes))
   return changes, .None
+}
+
+// TODO rework this into a streaming parsing? a lot of stuff can be skipped here
+parse_mr_comments :: proc (response: []u8, comments: ^#soa[dynamic]Comment) -> (err: Parse_Error) {
+  scoped_measure_duration("Parse MR comments: ")
+  err = .Error
+  json_data, parse_err := json.parse(response)
+  if parse_err != .None {
+    fmt.eprintln("Failed to parse json")
+    fmt.eprintln("Parse_Error:", parse_err)
+    fmt.eprintln(strings.clone_from_bytes(response))
+    return
+  }
+  defer json.destroy_value(json_data)
+  ok: bool
+  comments_data: json.Array
+  if comments_data, ok = json_data.(json.Array); !ok {
+    fmt.eprintln("Expected an Array")
+    return
+  }
+  for comment_data, i in comments_data {
+    comment_obj: json.Object
+    if comment_obj, ok = comment_data.(json.Object); !ok {
+      fmt.eprintln("Expected an Object")
+      return
+    }
+    system: bool
+    if system, ok = comment_obj["system"].(bool); !ok || system {
+      continue
+    }
+    body: string
+    if body, ok = comment_obj["body"].(string); !ok {
+      fmt.eprintln("Expected a string at comments i=", i)
+    }
+    // TODO support "non-diff" comments, which are general comments under MR
+    position_data: json.Object
+    if position_data, ok = comment_obj["position"].(json.Object); !ok {
+      fmt.eprintln("No position for comment i=", i)
+    }
+    old_line: f64
+    if old_line, ok = position_data["old_line"].(f64); !ok {
+      fmt.eprintln("Expected an int at comments i=", i)
+    }
+    new_line: f64
+    if new_line, ok = position_data["new_line"].(f64); !ok {
+      fmt.eprintln("Expected an int at comments i=", i)
+    }
+    old_path: string
+    if old_path, ok = position_data["old_path"].(string); !ok {
+      fmt.eprintln("Expected an old path string at comments i=", i)
+    }
+    new_path: string
+    if new_path, ok = position_data["new_path"].(string); !ok {
+      fmt.eprintln("Expected an new path string at comments i=", i)
+    }
+    append_soa(
+      comments,
+      Comment{
+        text = body,
+        old_path = old_path,
+        new_path = new_path,
+        old_line = (int)(old_line),
+        new_line = (int)(new_line),
+      }
+    )
+  }
+  fmt.println("found comments", len(comments))
+  return .None
 }

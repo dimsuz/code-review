@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:strings"
 import "core:runtime"
 import "core:sync"
+import "core:slice"
 import "core:thread"
 import "core:time"
 import "curl"
@@ -26,6 +27,7 @@ PRIVATE_TOKEN :: "1"
 State :: struct {
   mr_list: [dynamic]MergeRequest,
   mr_changes: map[int]Changes,
+  mr_comments: map[int]#soa[]Comment,
   current_mr_index: int,
   screen: Screen,
   error: string,
@@ -62,7 +64,10 @@ Changes :: struct {
 }
 
 Comment :: struct {
-  line: int,
+  old_path: string,
+  new_path: string,
+  old_line: int,
+  new_line: int,
   text: string,
 }
 
@@ -202,7 +207,8 @@ main :: proc() {
       case .MR_Changes:
         title := app_state.mr_list[app_state.current_mr_index].title
         changes := app_state.mr_changes[app_state.current_mr_index]
-        switch render_mr_changes(title, changes) {
+        comments := app_state.mr_comments[app_state.current_mr_index]
+        switch render_mr_changes(title, changes, comments) {
         case .BACK:
           app_state.screen = .MR_List
         case .NONE:
@@ -344,6 +350,7 @@ fetch_mr_changes :: proc(index: int) {
     if changes_err == .None && comments_err == .None {
       app_state.screen = .MR_Changes
       app_state.mr_changes[index] = changes
+      app_state.mr_comments[index] = comments[:]
       app_state.current_mr_index = index
     } else {
       app_state.screen = .Error
@@ -355,7 +362,7 @@ fetch_mr_changes :: proc(index: int) {
 
 MR_Changes_Action :: enum { BACK, NONE }
 
-render_mr_changes :: proc(title: string, changes: Changes) -> (action: MR_Changes_Action) {
+render_mr_changes :: proc(title: string, changes: Changes, comments: #soa[]Comment) -> (action: MR_Changes_Action) {
   action = .NONE
   ds := imgui.get_io().display_size
   flags: imgui.Window_Flags = .NoSavedSettings |
@@ -371,7 +378,7 @@ render_mr_changes :: proc(title: string, changes: Changes) -> (action: MR_Change
   }
   for i in 0..<len(changes.diff) {
     // TODO use IsRectVisible to test if change is in fact required to be submitted
-    render_mr_change(i, changes)
+    render_mr_change(i, changes, comments)
   }
   imgui.end()
   return
@@ -381,23 +388,35 @@ callback1 :: proc "cdecl" (data: ^imgui.Input_Text_Callback_Data) -> int {
   return 0
 }
 
-render_mr_change :: proc (index: int, changes: Changes) {
+render_mr_change :: proc (index: int, changes: Changes, mr_comments: #soa[]Comment) {
   flags: imgui.Table_Flags = .Borders | .RowBg
   imgui.push_style_color(.TableRowBg, imgui.get_style().colors[imgui.Col.TableRowBgAlt])
   lines := strings.split(changes.diff[index], "\n")
+  old_path := changes.old_path[index]
+  new_path := changes.new_path[index]
+
+  // TODO doing this on EACH frame is bad!
+  cc_old_path, cc_new_path, _, _, _ := soa_unzip(mr_comments)
+  comments: map[int]Comment
+  defer delete(comments)
+  for i in (0..<len(mr_comments)) {
+    if cc_old_path[i] == old_path && cc_new_path[i] == new_path {
+      comments[mr_comments[i].new_line] = mr_comments[i]
+      break
+    }
+  }
+
   if imgui.begin_table("change", 2, flags) {
     imgui.table_setup_column("action", imgui.Table_Column_Flags.WidthFixed, 32)
-    for line, li in lines {
+    for line, li in lines[1:] {
       imgui.table_next_column()
       imgui.button("v")
       imgui.table_next_column()
       imgui.text_unformatted(line)
-      @static text := "hello"
-      if index == 0 && li == 3 {
+      if c, ok := comments[li]; ok {
         if imgui.collapsing_header("Comment by dz") {
-          imgui.text_unformatted("Long comment\nС несколькими смыслами")
-          imgui.text_unformatted(text)
-          imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
+          imgui.text_wrapped(c.text)
+          // imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
         }
       }
     }
