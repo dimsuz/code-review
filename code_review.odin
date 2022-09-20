@@ -27,7 +27,7 @@ PRIVATE_TOKEN :: "1"
 State :: struct {
   mr_list: [dynamic]MergeRequest,
   mr_changes: map[int]Changes,
-  mr_comments: map[int]#soa[]Comment,
+  mr_comments: map[int][]Comment,
   current_mr_index: int,
   screen: Screen,
   error: string,
@@ -56,11 +56,20 @@ MergeRequest :: struct {
   // author: User
 }
 
+Diff_Header :: struct {
+  old_line_start: int,
+  old_line_count: int,
+  new_line_start: int,
+  new_line_count: int
+}
+
 Changes :: struct {
   old_path: []string,
   new_path: []string,
   new_file: []bool,
-  diff: []string,
+  diff: [][]string,
+  diff_header: []Diff_Header,
+  comments: [][]Comment,
 }
 
 Comment :: struct {
@@ -76,7 +85,9 @@ make_changes :: proc(count: int) -> Changes {
     old_path = make([]string, count),
     new_path = make([]string, count),
     new_file = make([]bool, count),
-    diff = make([]string, count),
+    diff = make([][]string, count),
+    diff_header = make([]Diff_Header, count),
+    comments = make([][]Comment, count),
   }
 }
 
@@ -85,6 +96,8 @@ destroy_changes :: proc(value: Changes) {
   delete(value.new_path)
   delete(value.new_file)
   delete(value.diff)
+  delete(value.diff_header)
+  delete(value.comments)
 }
 
 app_state : State
@@ -108,6 +121,10 @@ fetch_mr_list :: proc (_: ^thread.Thread) {
 }
 
 main :: proc() {
+  main_really()
+}
+
+main_really :: proc() {
   logger_opts := log.Options {
       .Level,
       .Line,
@@ -340,11 +357,13 @@ fetch_mr_changes :: proc(index: int) {
     defer delete(comments_response)
 
     // TODO it seems that changes are copied: created in parse_mr_changes and then copyed upon return.
-    // they can be quite memory heavy, fix this (if true)! UPD: Yes, rework them to #soa as done with comments
+    // they can be quite memory heavy, fix this (if true)!
     changes, changes_err := parse_mr_changes(changes_response)
     // TODO figure out when to call delete_soa(comments)
-    comments: #soa[dynamic]Comment
+    comments: [dynamic]Comment
     comments_err := parse_mr_comments(comments_response, &comments)
+
+    fill_changes_with_comments(&changes, comments[:])
 
     sync.mutex_lock(&app_state_mutex)
     if changes_err == .None && comments_err == .None {
@@ -360,9 +379,25 @@ fetch_mr_changes :: proc(index: int) {
   }
 }
 
+fill_changes_with_comments :: proc (changes: ^Changes, all_comments: []Comment) {
+  for ci in 0..<len(changes.old_path) {
+    comments: [dynamic]Comment
+    for comment in all_comments {
+      if changes.old_path[ci] == comment.old_path && changes.new_path[ci] == comment.new_path {
+        append_elem(&comments, comment)
+      }
+    }
+    if len(comments) != 0 {
+      changes.comments[ci] = comments[:]
+    } else {
+      delete(comments)
+    }
+  }
+}
+
 MR_Changes_Action :: enum { BACK, NONE }
 
-render_mr_changes :: proc(title: string, changes: Changes, comments: #soa[]Comment) -> (action: MR_Changes_Action) {
+render_mr_changes :: proc(title: string, changes: Changes, comments: []Comment) -> (action: MR_Changes_Action) {
   action = .NONE
   ds := imgui.get_io().display_size
   flags: imgui.Window_Flags = .NoSavedSettings |
@@ -388,40 +423,45 @@ callback1 :: proc "cdecl" (data: ^imgui.Input_Text_Callback_Data) -> int {
   return 0
 }
 
-render_mr_change :: proc (index: int, changes: Changes, mr_comments: #soa[]Comment) {
+render_mr_change :: proc (index: int, changes: Changes, mr_comments: []Comment) {
   flags: imgui.Table_Flags = .Borders | .RowBg
   imgui.push_style_color(.TableRowBg, imgui.get_style().colors[imgui.Col.TableRowBgAlt])
-  lines := strings.split(changes.diff[index], "\n")
-  old_path := changes.old_path[index]
-  new_path := changes.new_path[index]
-
-  // TODO doing this on EACH frame is bad!
-  cc_old_path, cc_new_path, _, _, _ := soa_unzip(mr_comments)
-  comments: map[int]Comment
-  defer delete(comments)
-  for i in (0..<len(mr_comments)) {
-    if cc_old_path[i] == old_path && cc_new_path[i] == new_path {
-      comments[mr_comments[i].new_line] = mr_comments[i]
-      break
-    }
-  }
 
   if imgui.begin_table("change", 2, flags) {
     imgui.table_setup_column("action", imgui.Table_Column_Flags.WidthFixed, 32)
-    for line, li in lines[1:] {
+    for line, li in changes.diff[index] {
       imgui.table_next_column()
       imgui.button("v")
       imgui.table_next_column()
       imgui.text_unformatted(line)
-      if c, ok := comments[li]; ok {
-        if imgui.collapsing_header("Comment by dz") {
-          imgui.text_wrapped(c.text)
-          // imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
+      if changes.comments[index] != nil {
+        for c in changes.comments[index] {
+          if c.new_line == li && imgui.collapsing_header("Comment by <todo>") {
+            imgui.text_wrapped(c.text)
+            // imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
+          }
         }
       }
     }
     imgui.end_table()
   }
   imgui.pop_style_color()
+  return
+}
+
+//
+// @param diff_lines lines excluding diff header
+//
+src_line_no_to_diff_line_no :: proc (
+  header: Diff_Header,
+  diff_lines: []string,
+  new_line_no: int) -> (diff_line_no: int, ok: bool)
+{
+  // new_first_line_no := diff_header[2]
+  ok = false
+  diff_line_no = -1
+  // for dl, index in diff_lines {
+  //   if dl[0] == '+' || dl[0] == ' '
+  // }
   return
 }

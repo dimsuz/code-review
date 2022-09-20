@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:strings"
+import "core:strconv"
 import "core:encoding/json"
 
 Parse_Error :: enum {
@@ -71,6 +72,7 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
     new_path : string
     new_file : bool
     diff : string
+    diff_header : Diff_Header
     if v, ok = json_change.(json.Object); !ok {
       fmt.eprintln("Expected an Object")
       return
@@ -94,14 +96,22 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
     changes.old_path[i] = strings.clone(old_path)
     changes.new_path[i] = strings.clone(new_path)
     changes.new_file[i] = new_file
-    changes.diff[i] = strings.clone(diff)
+    // Probably not ok to mix json parsing and "to-domain" parsing:
+    // this is done here for diff lines and diff header
+    diff_lines := strings.split(strings.clone(diff), "\n")
+    changes.diff[i] = diff_lines[1:]
+    if header := parse_diff_header(diff_lines[0]); header != nil {
+      changes.diff_header[i] = header.?
+    } else {
+      fmt.eprintln("Failed to parse diff header at changes i=", i)
+    }
   }
   fmt.println("parsed changes", len(mr_changes))
   return changes, .None
 }
 
 // TODO rework this into a streaming parsing? a lot of stuff can be skipped here
-parse_mr_comments :: proc (response: []u8, comments: ^#soa[dynamic]Comment) -> (err: Parse_Error) {
+parse_mr_comments :: proc (response: []u8, comments: ^[dynamic]Comment) -> (err: Parse_Error) {
   scoped_measure_duration("Parse MR comments: ")
   err = .Error
   json_data, parse_err := json.parse(response)
@@ -153,12 +163,12 @@ parse_mr_comments :: proc (response: []u8, comments: ^#soa[dynamic]Comment) -> (
     if new_path, ok = position_data["new_path"].(string); !ok {
       fmt.eprintln("Expected an new path string at comments i=", i)
     }
-    append_soa(
+    append_elem(
       comments,
       Comment{
-        text = body,
-        old_path = old_path,
-        new_path = new_path,
+        text = strings.clone(body),
+        old_path = strings.clone(old_path),
+        new_path = strings.clone(new_path),
         old_line = (int)(old_line),
         new_line = (int)(new_line),
       }
@@ -166,4 +176,22 @@ parse_mr_comments :: proc (response: []u8, comments: ^#soa[dynamic]Comment) -> (
   }
   fmt.println("found comments", len(comments))
   return .None
+}
+
+parse_diff_header :: proc (raw_header: string) -> Maybe(Diff_Header) {
+  header := raw_header[3:len(raw_header)-3]
+  sep_index := strings.index(header, " ")
+  if sep_index == -1 {
+    return nil
+  }
+  old_l := header[1:sep_index]
+  new_l := header[sep_index + 2:]
+  old_l_sep_idx := strings.index(old_l, ",")
+  new_l_sep_idx := strings.index(new_l, ",")
+  return Diff_Header{
+    old_line_start = strconv.atoi(old_l[:old_l_sep_idx]),
+    old_line_count = strconv.atoi(old_l[old_l_sep_idx+1:]),
+    new_line_start = strconv.atoi(new_l[:new_l_sep_idx]),
+    new_line_count = strconv.atoi(new_l[new_l_sep_idx+1:]),
+  }
 }
