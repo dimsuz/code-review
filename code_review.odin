@@ -122,6 +122,13 @@ fetch_mr_list :: proc (_: ^thread.Thread) {
 
 main :: proc() {
   main_really()
+  // lines := strings.split(
+  //   "package com.mapswithme.uikit.screen\n \n-import androidx.activity.compose.BackHandler\n+import androidx.activity.OnBackPressedDispatcher\n+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner\n import androidx.compose.runtime.Composable\n+import androidx.compose.runtime.DisposableEffect\n+import androidx.compose.runtime.DisposableEffectResult\n+import androidx.compose.runtime.DisposableEffectScope\n+import androidx.compose.runtime.SideEffect\n+import androidx.compose.runtime.getValue\n+import androidx.compose.runtime.remember\n+import androidx.compose.runtime.rememberUpdatedState\n+import androidx.compose.ui.platform.LocalLifecycleOwner\n+import androidx.lifecycle.LifecycleOwner\n+import androidx.navigation.NavBackStackEntry\n+import androidx.activity.OnBackPressedCallback as AndroidOnBackPressedCallback\n+\n+/**\n+ * see NOTE_BACKSTACK_HANDLE_ORDER\n+ *\n+ * @param id is used to identify the callback when the screen leaves the composition and returns later.\n+ * If not specified, the default handler takes the id from  [LocalLifecycleOwner] which is [NavBackStackEntry].\n+ * This will be enough in more cases.\n+ * If you use 2 or more backpress handlers on 1 screen you must specify this.\n+ * Note that it can't be changed after the screen has been recomposed, so use a constant value.\n+ * @param enabled default Compose flag to enable/disable callback\n+ * @param onBack lambda to be called on back pressed\n+ */\n \n @Composable\n-fun OnBackPressedHandler(onBack: () -> Unit) {\n-  BackHandler(enabled = true, onBack)\n+fun OnBackPressedHandler(\n+  id: OnBackPressCallbackId? = null,\n+  enabled: Boolean = true,\n+  onBack: () -> Unit\n+) {\n+  val currentOnBack by rememberUpdatedState(onBack)\n+  val backCallback = remember {\n+    object : AndroidOnBackPressedCallback(enabled) {\n+      override fun handleOnBackPressed() {\n+        currentOnBack()\n+      }\n+    }\n+  }\n+  SideEffect {\n+    backCallback.isEnabled = enabled\n+  }\n+  val backDispatcher = checkNotNull(LocalOnBackPressedDispatcherOwner.current) {\n+    \"No OnBackPressedDispatcherOwner was provided via LocalOnBackPressedDispatcherOwner\"\n+  }.onBackPressedDispatcher\n+  val lifecycleOwner = LocalLifecycleOwner.current\n+\n+  // Actually it's always NavBackStackEntry\n+  val backStackEntry = lifecycleOwner as NavBackStackEntry\n+  val callbackId = id ?: OnBackPressCallbackId(backStackEntry.id)\n+\n+  DisposableEffect(lifecycleOwner, backDispatcher) {\n+    configureCallbacksOrderDisposableEffect(\n+      callbackId,\n+      lifecycleOwner,\n+      backCallback,\n+      backDispatcher\n+    )\n+  }\n+}\n+\n+private fun DisposableEffectScope.configureCallbacksOrderDisposableEffect(\n+  callbackId: OnBackPressCallbackId,\n+  lifecycleOwner: LifecycleOwner,\n+  backCallback: AndroidOnBackPressedCallback,\n+  backDispatcher: OnBackPressedDispatcher\n+): DisposableEffectResult {\n+  if (onBackPressedCallbacks.contains(callbackId)) {\n+    val enabledCallbacks = onBackPressedCallbacks.values.toList()\n+      .takeLastWhile { it.enabled && it.id != callbackId }\n+    enabledCallbacks.forEach { it.callback.remove() }\n+    backDispatcher.addCallback(lifecycleOwner, backCallback)\n+    enabledCallbacks.forEach {\n+      backDispatcher.addCallback(it.lifecycleOwner, it.callback)\n+    }\n+    onBackPressedCallbacks[callbackId] = onBackPressedCallbacks[callbackId]!!.copy(enabled = true)\n+  } else {\n+    onBackPressedCallbacks[callbackId] = OnBackPressedCallbackSpec(\n+      id = callbackId,\n+      enabled = true,\n+      lifecycleOwner = lifecycleOwner,\n+      callback = backCallback\n+    )\n+    backDispatcher.addCallback(lifecycleOwner, backCallback)\n+  }\n+\n+  return onDispose {\n+    onBackPressedCallbacks[callbackId] = onBackPressedCallbacks[callbackId]!!.copy(enabled = false)\n+    // If we come back from the screen that was at the top of the stack we need to clear it\n+    // because we can't get to the same screen again\n+    val entries = onBackPressedCallbacks.entries.toList().dropLastWhile { !it.value.enabled }\n+    onBackPressedCallbacks.clear()\n+    entries.forEach { onBackPressedCallbacks[it.key] = it.value }\n+    backCallback.remove()\n+  }\n }\n+\n+private val onBackPressedCallbacks =\n+  mutableMapOf<OnBackPressCallbackId, OnBackPressedCallbackSpec>()\n+\n+private data class OnBackPressedCallbackSpec(\n+  val id: OnBackPressCallbackId,\n+  val enabled: Boolean,\n+  val lifecycleOwner: LifecycleOwner,\n+  val callback: AndroidOnBackPressedCallback\n+)\n+\n+@JvmInline\n+value class OnBackPressCallbackId(val value: Any)\n+\n+//  NOTE_BACKSTACK_HANDLE_ORDER\n+//  Compose handles the callback like this(\"screen 1\" = \"S1\", \"screen 2\" = \"S2\"):\n+//  1. Open S1 -> add its callback to the stack\n+//  2. Open S2 -> add its callback to top of the stack and remove S1 callback after\n+//  3. Back to S1 -> add S1 callback to top of the stack and remove S2 callback after\n+//\n+//  Now we are using 2 routers for navigation: AppRouter which is used to control\n+//  fullscreen screens and AppBottomSheetRouter which is used to control bottom sheet screens.\n+//  In this case the default callback handling works differently:\n+//  1. Open AppRouter S1 -> Stack: AppRouter S1\n+//  2. Open AppBottomSheetRouter S1 ->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1 (added without deleting of AppRouter S1)\n+//  3. Open AppRouter S2 -> Stack: AppBottomSheetRouter S1, AppRouter S2\n+//    (since the router is the same as S2, it has been added to the top of the stack and AppRouter S1 has been removed)\n+//  4. Back to AppBottomSheetRouter S1 from S2 ->\n+//    Stack: AppBottomSheetRouter S1, AppRouter S1\n+//    (this is because when we close AppRouter S2 we actually go back to S1 of the same router,\n+//    then AppRouter S1 will be added to the top of the stack and S2 will be removed)\n+//\n+//  The AppRouter S1 callback will then be executed first when the user presses the native back button.\n+//\n+//  To prevent this behavior, callbacks are added to an extra stack\n+//  where they won't be removed if the screen is still on the backstack.\n+//  The behavior can be described like this:\n+//  1. Open AppRouter S1 -> Extra Stack: AppRouter S1 -> Stack: AppRouter S1\n+//  2. Open AppBottomSheetRouter S1  ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1\n+//  3. Open AppRouter S2 ->\n+//    Extra Stack: AppRouter S1(disabled), AppBottomSheetRouter S1, AppRouter S2 ->\n+//    Stack: AppBottomSheetRouter S1, AppRouter S2\n+//  4. Back to AppBottomSheetRouter S1 from S2 ->\n+//    Extra Stack: AppRouter S1(enabled), AppBottomSheetRouter S1, AppRouter S2\n+//    (We are looking for an Extra stack that has a callback with the id we are trying to add.\n+//    If we found it, then we take all enabled callbacks after the disabled one,\n+//    then remove them from the Compose stack. After that, we add the disabled callback\n+//    to the top of the Compose stack. Then we add the enabled callbacks that was removed earlier\n+//    to the top of the Compose stack. And finally, we mark the disabled callback as enabled) ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1, AppRouter S2(disabled) ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1\n+//    (the tail of disabled callbacks is removed each time a callback is disabled) ->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1\n+//\n+//  The id parameter is used to identify the callback when the screen leaves the composition and returns later.\n+//  If not specified, the default handler takes the id from  [LocalLifecycleOwner] which is [NavBackStackEntry].\n+//  This will be enough in more cases.\n+//  If you use 2 or more backpress handlers on 1 screen you must specify this.\n+//  Note that it can't be changed after the screen has been recomposed, so use a constant value.\n",
+  //   "\n"
+  // )
+  // diff_header := parse_diff_header("@@ -1,9 +1,162 @@").?
+  // ll, ok := src_line_no_to_diff_line_no(diff_header, lines, 45)
+  // fmt.println("diff line no:", ll)
 }
 
 main_really :: proc() {
@@ -344,7 +351,7 @@ fetch_mr_changes :: proc(index: int) {
     sync.mutex_unlock(&app_state_mutex)
   } else {
     app_state.screen = .Loading
-    iid := app_state.mr_list[index].iid
+    iid := MR_IID != 0 ? MR_IID : app_state.mr_list[index].iid
     sync.mutex_unlock(&app_state_mutex)
 
     changes_url := fmt.tprintf("https://gitlab.com/api/v4/projects/%s/merge_requests/%d/changes?private_token=%s", PROJECT_ID, iid, PRIVATE_TOKEN)
@@ -435,8 +442,16 @@ render_mr_change :: proc (index: int, changes: Changes, mr_comments: []Comment) 
       imgui.table_next_column()
       imgui.text_unformatted(line)
       if changes.comments[index] != nil {
-        for c in changes.comments[index] {
-          if c.new_line == li && imgui.collapsing_header("Comment by <todo>") {
+        for c, ci in changes.comments[index] {
+          line_change := c.old_line == 0 ? Diff_Line_Change.New : Diff_Line_Change.Old
+          src_line_no := c.old_line == 0 ? c.new_line : c.old_line
+          line_no, ok := src_line_no_to_diff_line_no(
+            changes.diff_header[index],
+            changes.diff[index],
+            src_line_no,
+            line_change
+          );
+          if ok && li == line_no && comment_header(ci, index, "Comment by <todo>") {
             imgui.text_wrapped(c.text)
             // imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
           }
@@ -449,19 +464,47 @@ render_mr_change :: proc (index: int, changes: Changes, mr_comments: []Comment) 
   return
 }
 
+comment_header :: proc(comment_idx: int, change_idx: int, title: string) -> bool {
+  imgui.push_id(fmt.tprintf("%d_%d", comment_idx, change_idx))
+  defer imgui.pop_id()
+  return imgui.collapsing_header(title)
+}
+
+Diff_Line_Change :: enum { Old, New }
+
 //
 // @param diff_lines lines excluding diff header
 //
 src_line_no_to_diff_line_no :: proc (
   header: Diff_Header,
   diff_lines: []string,
-  new_line_no: int) -> (diff_line_no: int, ok: bool)
+  src_line_no: int,
+  line_change: Diff_Line_Change,
+) -> (diff_line_idx: int, ok: bool)
 {
   // new_first_line_no := diff_header[2]
   ok = false
-  diff_line_no = -1
-  // for dl, index in diff_lines {
-  //   if dl[0] == '+' || dl[0] == ' '
-  // }
+  diff_line_idx = header.new_line_start
+  other_line_count := 0
+  symbol : u8
+  switch line_change {
+    case .Old:
+    symbol = '+'
+    case .New:
+    symbol = '-'
+  }
+  for dl, index in diff_lines {
+    if len(dl) == 0 {
+      log.errorf("incorrect diff, contains empty line at %d", index)
+      return
+    }
+    if dl[0] == symbol {
+      other_line_count += 1
+    }
+    diff_line_idx = header.new_line_start + index - other_line_count
+    if diff_line_idx == src_line_no {
+      return index, true
+    }
+  }
   return
 }

@@ -98,7 +98,7 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
     changes.new_file[i] = new_file
     // Probably not ok to mix json parsing and "to-domain" parsing:
     // this is done here for diff lines and diff header
-    diff_lines := strings.split(strings.clone(diff), "\n")
+    diff_lines := strings.split(strings.clone(strings.trim_right(diff, "\n")), "\n")
     changes.diff[i] = diff_lines[1:]
     if header := parse_diff_header(diff_lines[0]); header != nil {
       changes.diff_header[i] = header.?
