@@ -70,6 +70,7 @@ Changes :: struct {
   diff: [][]string,
   diff_header: []Diff_Header,
   comments: [][]Comment,
+  sha: string,
 }
 
 Comment :: struct {
@@ -78,6 +79,7 @@ Comment :: struct {
   old_line: int,
   new_line: int,
   text: string,
+  author_name: string,
 }
 
 make_changes :: proc(count: int) -> Changes {
@@ -368,7 +370,7 @@ fetch_mr_changes :: proc(index: int) {
     changes, changes_err := parse_mr_changes(changes_response)
     // TODO figure out when to call delete_soa(comments)
     comments: [dynamic]Comment
-    comments_err := parse_mr_comments(comments_response, &comments)
+    comments_err := parse_mr_comments(changes.sha, comments_response, &comments)
 
     fill_changes_with_comments(&changes, comments[:])
 
@@ -451,7 +453,7 @@ render_mr_change :: proc (index: int, changes: Changes, mr_comments: []Comment) 
             src_line_no,
             line_change
           );
-          if ok && li == line_no && comment_header(ci, index, "Comment by <todo>") {
+          if ok && li == line_no && comment_header(ci, index, c.author_name) {
             imgui.text_wrapped(c.text)
             // imgui.input_text_multiline(label = "##reply", buf = text, buf_size = len(text), callback = callback1, flags = imgui.Input_Text_Flags(imgui.Input_Text_Flags.CallbackResize))
           }
@@ -464,10 +466,14 @@ render_mr_change :: proc (index: int, changes: Changes, mr_comments: []Comment) 
   return
 }
 
-comment_header :: proc(comment_idx: int, change_idx: int, title: string) -> bool {
+comment_header :: proc(
+  comment_idx: int,
+  change_idx: int,
+  author_name: string) -> bool
+{
   imgui.push_id(fmt.tprintf("%d_%d", comment_idx, change_idx))
   defer imgui.pop_id()
-  return imgui.collapsing_header(title)
+  return imgui.collapsing_header(fmt.tprintf("Comment by %s", author_name))
 }
 
 Diff_Line_Change :: enum { Old, New }

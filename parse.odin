@@ -60,12 +60,18 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
     fmt.eprintln("Expected an Object")
     return
   }
+  sha: string
+  if sha, ok = mr_obj["sha"].(string); !ok {
+    fmt.eprintln("sha is null")
+    return
+  }
   mr_changes: json.Array
   if mr_changes, ok = mr_obj["changes"].(json.Array); !ok {
     fmt.eprintln("Expected an Array")
     return
   }
   changes = make_changes(count = len(mr_changes))
+  changes.sha = strings.clone(sha)
   for json_change, i in mr_changes {
     v : json.Object
     old_path : string
@@ -111,7 +117,7 @@ parse_mr_changes :: proc(response: []u8) -> (changes: Changes, err: Parse_Error)
 }
 
 // TODO rework this into a streaming parsing? a lot of stuff can be skipped here
-parse_mr_comments :: proc (response: []u8, comments: ^[dynamic]Comment) -> (err: Parse_Error) {
+parse_mr_comments :: proc (filter_sha: string, response: []u8, comments: ^[dynamic]Comment) -> (err: Parse_Error) {
   scoped_measure_duration("Parse MR comments: ")
   err = .Error
   json_data, parse_err := json.parse(response)
@@ -142,10 +148,22 @@ parse_mr_comments :: proc (response: []u8, comments: ^[dynamic]Comment) -> (err:
     if body, ok = comment_obj["body"].(string); !ok {
       fmt.eprintln("Expected a string at comments i=", i)
     }
+    author_data: json.Object
+    if author_data, ok = comment_obj["author"].(json.Object); !ok {
+      fmt.eprintln("Expected an author object at comments i=", i)
+    }
     // TODO support "non-diff" comments, which are general comments under MR
     position_data: json.Object
     if position_data, ok = comment_obj["position"].(json.Object); !ok {
       fmt.eprintln("No position for comment i=", i)
+    }
+    head_sha: string
+    if head_sha, ok = position_data["head_sha"].(string); !ok {
+      fmt.eprintln("Expected head_sha for comment i=", i)
+      continue
+    }
+    if head_sha != filter_sha {
+      continue
     }
     old_line: f64
     if old_line, ok = position_data["old_line"].(f64); !ok {
@@ -163,6 +181,11 @@ parse_mr_comments :: proc (response: []u8, comments: ^[dynamic]Comment) -> (err:
     if new_path, ok = position_data["new_path"].(string); !ok {
       fmt.eprintln("Expected an new path string at comments i=", i)
     }
+    author_name: string
+    if author_name, ok = author_data["name"].(string); !ok {
+      fmt.eprintln("Expected an author name string at comments i=", i)
+    }
+
     append_elem(
       comments,
       Comment{
@@ -171,6 +194,7 @@ parse_mr_comments :: proc (response: []u8, comments: ^[dynamic]Comment) -> (err:
         new_path = strings.clone(new_path),
         old_line = (int)(old_line),
         new_line = (int)(new_line),
+        author_name = strings.clone(author_name)
       }
     )
   }
