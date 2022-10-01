@@ -202,6 +202,102 @@ parse_mr_comments :: proc (filter_sha: string, response: []u8, comments: ^[dynam
   return .None
 }
 
+// TODO rework this into a streaming parsing? a lot of stuff can be skipped here
+parse_mr_comments_to_db :: proc (response: []u8) -> (err: Parse_Error) {
+  scoped_measure_duration("Parse MR comments: ")
+  err = .Error
+  json_data, parse_err := json.parse(response)
+  if parse_err != .None {
+    fmt.eprintln("Failed to parse json")
+    fmt.eprintln("Parse_Error:", parse_err)
+    fmt.eprintln(strings.clone_from_bytes(response))
+    return
+  }
+  defer json.destroy_value(json_data)
+  ok: bool
+  comments_data: json.Array
+  if comments_data, ok = json_data.(json.Array); !ok {
+    fmt.eprintln("Expected an Array")
+    return
+  }
+  for comment_data, i in comments_data {
+    comment_obj: json.Object
+    if comment_obj, ok = comment_data.(json.Object); !ok {
+      fmt.eprintln("Expected an Object")
+      return
+    }
+    system: bool
+    if system, ok = comment_obj["system"].(bool); !ok || system {
+      continue
+    }
+    body: string
+    if body, ok = comment_obj["body"].(string); !ok {
+      fmt.eprintln("Expected a string at comments i=", i)
+    }
+    mr_iid: f64
+    if mr_iid, ok = comment_obj["noteable_iid"].(f64); !ok {
+      fmt.eprintln("Expected a notable_iid at comments i=", i)
+    }
+    id: f64
+    if id, ok = comment_obj["id"].(f64); !ok {
+      fmt.eprintln("Expected an id at comments i=", i)
+    }
+    updated_at: string
+    if updated_at, ok = comment_obj["updated_at"].(string); !ok {
+      fmt.eprintln("Expected an updated_at at comments i=", i)
+    }
+    author_data: json.Object
+    if author_data, ok = comment_obj["author"].(json.Object); !ok {
+      fmt.eprintln("Expected an author object at comments i=", i)
+    }
+    // TODO support "non-diff" comments, which are general comments under MR
+    position_data: json.Object
+    if position_data, ok = comment_obj["position"].(json.Object); !ok {
+      fmt.eprintln("No position for comment i=", i)
+    }
+    head_sha: string
+    if head_sha, ok = position_data["head_sha"].(string); !ok {
+      fmt.eprintln("Expected head_sha for comment i=", i)
+      continue
+    }
+    old_line: f64
+    if old_line, ok = position_data["old_line"].(f64); !ok {
+      fmt.eprintln("Expected an old_line at comments i=", i)
+    }
+    new_line: f64
+    if new_line, ok = position_data["new_line"].(f64); !ok {
+      fmt.eprintln("Expected an int at comments i=", i)
+    }
+    old_path: string
+    if old_path, ok = position_data["old_path"].(string); !ok {
+      fmt.eprintln("Expected an old path string at comments i=", i)
+    }
+    new_path: string
+    if new_path, ok = position_data["new_path"].(string); !ok {
+      fmt.eprintln("Expected an new path string at comments i=", i)
+    }
+    author_name: string
+    if author_name, ok = author_data["name"].(string); !ok {
+      fmt.eprintln("Expected an author name string at comments i=", i)
+    }
+
+    // TODO wrap this into a transaction!
+    db_add_comment(
+      mr_iid = (u32)(mr_iid),
+      id = (u32)(id),
+      sha = head_sha,
+      text = body,
+      old_path = old_path,
+      new_path = new_path,
+      old_line = (u32)(old_line),
+      new_line = (u32)(new_line),
+      author_name = author_name,
+      updated_at = updated_at
+    )
+  }
+  return .None
+}
+
 parse_diff_header :: proc (raw_header: string) -> Maybe(Diff_Header) {
   header := raw_header[3:len(raw_header)-3]
   sep_index := strings.index(header, " ")

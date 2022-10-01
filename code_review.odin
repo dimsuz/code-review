@@ -74,12 +74,15 @@ Changes :: struct {
 }
 
 Comment :: struct {
+  id: u32,
+  sha: string,
   old_path: string,
   new_path: string,
   old_line: int,
   new_line: int,
   text: string,
   author_name: string,
+  updated_at: string,
 }
 
 make_changes :: proc(count: int) -> Changes {
@@ -124,13 +127,6 @@ fetch_mr_list :: proc (_: ^thread.Thread) {
 
 main :: proc() {
   main_really()
-  // lines := strings.split(
-  //   "package com.mapswithme.uikit.screen\n \n-import androidx.activity.compose.BackHandler\n+import androidx.activity.OnBackPressedDispatcher\n+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner\n import androidx.compose.runtime.Composable\n+import androidx.compose.runtime.DisposableEffect\n+import androidx.compose.runtime.DisposableEffectResult\n+import androidx.compose.runtime.DisposableEffectScope\n+import androidx.compose.runtime.SideEffect\n+import androidx.compose.runtime.getValue\n+import androidx.compose.runtime.remember\n+import androidx.compose.runtime.rememberUpdatedState\n+import androidx.compose.ui.platform.LocalLifecycleOwner\n+import androidx.lifecycle.LifecycleOwner\n+import androidx.navigation.NavBackStackEntry\n+import androidx.activity.OnBackPressedCallback as AndroidOnBackPressedCallback\n+\n+/**\n+ * see NOTE_BACKSTACK_HANDLE_ORDER\n+ *\n+ * @param id is used to identify the callback when the screen leaves the composition and returns later.\n+ * If not specified, the default handler takes the id from  [LocalLifecycleOwner] which is [NavBackStackEntry].\n+ * This will be enough in more cases.\n+ * If you use 2 or more backpress handlers on 1 screen you must specify this.\n+ * Note that it can't be changed after the screen has been recomposed, so use a constant value.\n+ * @param enabled default Compose flag to enable/disable callback\n+ * @param onBack lambda to be called on back pressed\n+ */\n \n @Composable\n-fun OnBackPressedHandler(onBack: () -> Unit) {\n-  BackHandler(enabled = true, onBack)\n+fun OnBackPressedHandler(\n+  id: OnBackPressCallbackId? = null,\n+  enabled: Boolean = true,\n+  onBack: () -> Unit\n+) {\n+  val currentOnBack by rememberUpdatedState(onBack)\n+  val backCallback = remember {\n+    object : AndroidOnBackPressedCallback(enabled) {\n+      override fun handleOnBackPressed() {\n+        currentOnBack()\n+      }\n+    }\n+  }\n+  SideEffect {\n+    backCallback.isEnabled = enabled\n+  }\n+  val backDispatcher = checkNotNull(LocalOnBackPressedDispatcherOwner.current) {\n+    \"No OnBackPressedDispatcherOwner was provided via LocalOnBackPressedDispatcherOwner\"\n+  }.onBackPressedDispatcher\n+  val lifecycleOwner = LocalLifecycleOwner.current\n+\n+  // Actually it's always NavBackStackEntry\n+  val backStackEntry = lifecycleOwner as NavBackStackEntry\n+  val callbackId = id ?: OnBackPressCallbackId(backStackEntry.id)\n+\n+  DisposableEffect(lifecycleOwner, backDispatcher) {\n+    configureCallbacksOrderDisposableEffect(\n+      callbackId,\n+      lifecycleOwner,\n+      backCallback,\n+      backDispatcher\n+    )\n+  }\n+}\n+\n+private fun DisposableEffectScope.configureCallbacksOrderDisposableEffect(\n+  callbackId: OnBackPressCallbackId,\n+  lifecycleOwner: LifecycleOwner,\n+  backCallback: AndroidOnBackPressedCallback,\n+  backDispatcher: OnBackPressedDispatcher\n+): DisposableEffectResult {\n+  if (onBackPressedCallbacks.contains(callbackId)) {\n+    val enabledCallbacks = onBackPressedCallbacks.values.toList()\n+      .takeLastWhile { it.enabled && it.id != callbackId }\n+    enabledCallbacks.forEach { it.callback.remove() }\n+    backDispatcher.addCallback(lifecycleOwner, backCallback)\n+    enabledCallbacks.forEach {\n+      backDispatcher.addCallback(it.lifecycleOwner, it.callback)\n+    }\n+    onBackPressedCallbacks[callbackId] = onBackPressedCallbacks[callbackId]!!.copy(enabled = true)\n+  } else {\n+    onBackPressedCallbacks[callbackId] = OnBackPressedCallbackSpec(\n+      id = callbackId,\n+      enabled = true,\n+      lifecycleOwner = lifecycleOwner,\n+      callback = backCallback\n+    )\n+    backDispatcher.addCallback(lifecycleOwner, backCallback)\n+  }\n+\n+  return onDispose {\n+    onBackPressedCallbacks[callbackId] = onBackPressedCallbacks[callbackId]!!.copy(enabled = false)\n+    // If we come back from the screen that was at the top of the stack we need to clear it\n+    // because we can't get to the same screen again\n+    val entries = onBackPressedCallbacks.entries.toList().dropLastWhile { !it.value.enabled }\n+    onBackPressedCallbacks.clear()\n+    entries.forEach { onBackPressedCallbacks[it.key] = it.value }\n+    backCallback.remove()\n+  }\n }\n+\n+private val onBackPressedCallbacks =\n+  mutableMapOf<OnBackPressCallbackId, OnBackPressedCallbackSpec>()\n+\n+private data class OnBackPressedCallbackSpec(\n+  val id: OnBackPressCallbackId,\n+  val enabled: Boolean,\n+  val lifecycleOwner: LifecycleOwner,\n+  val callback: AndroidOnBackPressedCallback\n+)\n+\n+@JvmInline\n+value class OnBackPressCallbackId(val value: Any)\n+\n+//  NOTE_BACKSTACK_HANDLE_ORDER\n+//  Compose handles the callback like this(\"screen 1\" = \"S1\", \"screen 2\" = \"S2\"):\n+//  1. Open S1 -> add its callback to the stack\n+//  2. Open S2 -> add its callback to top of the stack and remove S1 callback after\n+//  3. Back to S1 -> add S1 callback to top of the stack and remove S2 callback after\n+//\n+//  Now we are using 2 routers for navigation: AppRouter which is used to control\n+//  fullscreen screens and AppBottomSheetRouter which is used to control bottom sheet screens.\n+//  In this case the default callback handling works differently:\n+//  1. Open AppRouter S1 -> Stack: AppRouter S1\n+//  2. Open AppBottomSheetRouter S1 ->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1 (added without deleting of AppRouter S1)\n+//  3. Open AppRouter S2 -> Stack: AppBottomSheetRouter S1, AppRouter S2\n+//    (since the router is the same as S2, it has been added to the top of the stack and AppRouter S1 has been removed)\n+//  4. Back to AppBottomSheetRouter S1 from S2 ->\n+//    Stack: AppBottomSheetRouter S1, AppRouter S1\n+//    (this is because when we close AppRouter S2 we actually go back to S1 of the same router,\n+//    then AppRouter S1 will be added to the top of the stack and S2 will be removed)\n+//\n+//  The AppRouter S1 callback will then be executed first when the user presses the native back button.\n+//\n+//  To prevent this behavior, callbacks are added to an extra stack\n+//  where they won't be removed if the screen is still on the backstack.\n+//  The behavior can be described like this:\n+//  1. Open AppRouter S1 -> Extra Stack: AppRouter S1 -> Stack: AppRouter S1\n+//  2. Open AppBottomSheetRouter S1  ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1\n+//  3. Open AppRouter S2 ->\n+//    Extra Stack: AppRouter S1(disabled), AppBottomSheetRouter S1, AppRouter S2 ->\n+//    Stack: AppBottomSheetRouter S1, AppRouter S2\n+//  4. Back to AppBottomSheetRouter S1 from S2 ->\n+//    Extra Stack: AppRouter S1(enabled), AppBottomSheetRouter S1, AppRouter S2\n+//    (We are looking for an Extra stack that has a callback with the id we are trying to add.\n+//    If we found it, then we take all enabled callbacks after the disabled one,\n+//    then remove them from the Compose stack. After that, we add the disabled callback\n+//    to the top of the Compose stack. Then we add the enabled callbacks that was removed earlier\n+//    to the top of the Compose stack. And finally, we mark the disabled callback as enabled) ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1, AppRouter S2(disabled) ->\n+//    Extra Stack: AppRouter S1, AppBottomSheetRouter S1\n+//    (the tail of disabled callbacks is removed each time a callback is disabled) ->\n+//    Stack: AppRouter S1, AppBottomSheetRouter S1\n+//\n+//  The id parameter is used to identify the callback when the screen leaves the composition and returns later.\n+//  If not specified, the default handler takes the id from  [LocalLifecycleOwner] which is [NavBackStackEntry].\n+//  This will be enough in more cases.\n+//  If you use 2 or more backpress handlers on 1 screen you must specify this.\n+//  Note that it can't be changed after the screen has been recomposed, so use a constant value.\n",
-  //   "\n"
-  // )
-  // diff_header := parse_diff_header("@@ -1,9 +1,162 @@").?
-  // ll, ok := src_line_no_to_diff_line_no(diff_header, lines, 45)
-  // fmt.println("diff line no:", ll)
 }
 
 main_really :: proc() {
@@ -143,6 +139,8 @@ main_really :: proc() {
 
   init_network()
   defer destroy_network()
+
+  db_init()
 
   log.info("Starting SDL Example...")
   init_err := sdl.Init({.VIDEO})
@@ -371,6 +369,7 @@ fetch_mr_changes :: proc(index: int) {
     // TODO figure out when to call delete_soa(comments)
     comments: [dynamic]Comment
     comments_err := parse_mr_comments(changes.sha, comments_response, &comments)
+    comments1_err := parse_mr_comments_to_db(comments_response)
 
     fill_changes_with_comments(&changes, comments[:])
 
