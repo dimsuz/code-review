@@ -269,7 +269,7 @@ init_imgui_state :: proc(window: ^sdl.Window) -> Imgui_State {
   using res := Imgui_State{}
 
   imgui.create_context()
-  imgui.style_colors_dark()
+  imgui.style_colors_light()
   io := imgui.get_io()
   ranges : imgui.Im_Vector(imgui.Wchar)
   builder : imgui.Font_Glyph_Ranges_Builder
